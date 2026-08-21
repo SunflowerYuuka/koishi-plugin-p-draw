@@ -1,0 +1,29 @@
+{
+  "name": "koishi-plugin-p-draw",
+  "description": "p点-绘图，连接本地 ComfyUI 生图。支持自然语言优化、尺寸选择、画师组、固定角色、生成队列，需要配合 p-qiandao 使用",
+  "version": "1.2.9",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "readme.md"
+  ],
+  "contributors": [
+    "YayiMiko <2556123498@qq.com>"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.17.10"
+  },
+  "koishi": {
+    "service": {
+      "required": [
+        "database"
+      ]
+    }
+  }
+}
