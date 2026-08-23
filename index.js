@@ -921,6 +921,40 @@ function canonicalTagText(tag) {
   return String(tag || '').trim()
 }
 
+// 内联画师标签（@name / artist:name）与内联质量词（masterpiece / best quality / score_N 等）。
+// 提示词优化会把它们交给 LLM 重写并剥掉，这里在优化后把它们从原始输入中补回，
+// 避免用户直接写在消息里的画师标签 / 质量词丢失。
+const INLINE_QUALITY_RE = /^(masterpiece|best quality|amazing quality|high quality|good quality|score_\d+)$/i
+
+function appendInlineProtectedTags(prompt, original, raw) {
+  if (raw || !original) return prompt
+  if (/(不用我的风格|不要我的风格|不使用我的风格|不要画师词|不用画师词|不加画师词|no artist)/i.test(original)) return prompt
+  const tags = []
+  const seen = new Set(splitTags(prompt).map(t => normalizeTagKey(t)))
+  for (const token of splitTags(original)) {
+    const t = String(token || '').trim()
+    if (!t) continue
+    const artist = normalizeAnimaArtistTag(t)
+    if (artist.startsWith('@')) {
+      const key = normalizeTagKey(artist)
+      if (!seen.has(key)) {
+        seen.add(key)
+        tags.push(artist)
+      }
+      continue
+    }
+    if (INLINE_QUALITY_RE.test(t)) {
+      const key = normalizeTagKey(t)
+      if (!seen.has(key)) {
+        seen.add(key)
+        tags.push(t)
+      }
+    }
+  }
+  if (!tags.length) return prompt
+  return prompt + ', ' + tags.join(', ')
+}
+
 const QUALITY_BLOCKLIST = new Set([
   'masterpiece', 'best quality', 'score_7', 'score_6', 'score_5', 'score_4', 'score_3', 'score_2', 'score_1',
   'safe', 'worst quality', 'low quality', 'artist name',
@@ -3407,7 +3441,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 非按张优化模式：直接拼好整批复用的提示词
     if (!perImageOptimize) {
       const composed = composePrompt(finalPrompt, raw)
-      finalPrompt = composed.prompt
+      finalPrompt = appendInlineProtectedTags(composed.prompt, userPrompt, raw)
       degraded = degraded || composed.degraded
     }
 
@@ -3431,7 +3465,7 @@ exports.apply = async function apply(ctx, cfg) {
           let p = finalPrompt
           if (perImageOptimize) {
             const optimized = await optimizePrompt(session, userPrompt, true, i2iRule)
-            p = composePrompt(optimized.prompt || userPrompt, raw).prompt
+            p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
           }
           return runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun))
         })
@@ -3483,7 +3517,7 @@ exports.apply = async function apply(ctx, cfg) {
       let p = finalPrompt
       if (perImageOptimize) {
         const optimized = await optimizePrompt(session, userPrompt, true, i2iRule)
-        p = composePrompt(optimized.prompt || userPrompt, raw).prompt
+        p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
       let result
       if (cfg.queueEnabled) {
