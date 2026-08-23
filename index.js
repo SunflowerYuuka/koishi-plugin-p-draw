@@ -1696,7 +1696,7 @@ exports.apply = async function apply(ctx, cfg) {
     const steps = Math.round(Number(overrides.steps) || workCfg.steps)
     const cfgVal = Number(overrides.cfg) || workCfg.cfg
     const seed = Number(overrides.seed) || crypto.randomInt(1, 2 ** 32 - 1)
-    const negativePrompt = overrides.negativePrompt || cfg.negativePrompt || ''
+    const negativePrompt = joinPromptParts([overrides.negativePrompt || cfg.negativePrompt || ''])
     const i2iImage = overrides.i2iImage
     if (i2iImage && cfg.customWorkflowEnabled && cfg.customWorkflowPath) {
       return { ok: false, message: 'i2i（以图生图）暂不支持自定义工作流（customWorkflowEnabled），请关闭后再试。' }
@@ -2022,7 +2022,7 @@ exports.apply = async function apply(ctx, cfg) {
       parts.push(String(cfg.styleTags).trim())
     }
     parts.push(userPrompt)
-    return { prompt: parts.filter(Boolean).join(', ') + (parts.filter(Boolean).length ? ',' : ''), degraded: false }
+    return { prompt: joinPromptParts(parts), degraded: false }
   }
 
   // ---------------- 多人（移植自 anima /anm 多人） ----------------
