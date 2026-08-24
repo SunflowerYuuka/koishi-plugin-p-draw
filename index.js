@@ -81,6 +81,7 @@ const zhCN = {
   img2imgDenoise: { $description: '普通以图生图（p-draw i2i）的去噪强度，越小越接近原图（建议 0.4-0.7）' },
   i2iMode: { $description: 'i2i 模式选择方式：ask=每次询问 / style=直接换风格（漫画化）/ ootd=直接换装换姿势 / plain=普通 img2img' },
   i2iAskTimeout: { $description: 'i2i 模式询问等待时间（秒）' },
+  seriesAskTimeout: { $description: '连续图 LLM 使用确认等待时间（秒）' },
   i2iStyleDenoise: { $description: '换风格模式（漫画化）的去噪强度，越大风格变化越彻底（建议 0.7-0.85）' },
   i2iOotdDenoise: { $description: '换装换姿势模式（保留角色）的去噪强度（建议 0.5-0.6）' },
   i2iControlNetStrength: { $description: '换风格模式的 ControlNet 强度，越大构图锁得越死（建议 0.5-0.8）' },
@@ -156,6 +157,9 @@ const zhCN = {
         'multi-degraded': '多人视觉校验不可用{0}，本次已直接发送生成结果。',
         'multi-verify-error': '多人视觉校验调用失败：{0}',
         'series-usage': '连续图：p-draw 连续 <角色>：<阶段1> → <阶段2> → ...\n例：p-draw 连续 少女：清纯校服 → 换上晚礼服 → 华丽登场\n或用 | 分隔，可加 --seed 固定种子保证角色一致。',
+        'series-llm-ask': '是否使用 LLM 优化连续图各阶段提示词？\n1. 是（使用 LLM，自动整理成 Danbooru tags）\n2. 否（不使用 LLM，直接用你输入的内容）\n3. 取消（不生成）\n请回复 1 / 2 / 3',
+        'series-llm-invalid': '未识别的回答，请回复 1（使用 LLM）/ 2（不使用 LLM）/ 3（取消）。',
+        'series-no-llm': '本次未使用 LLM 优化，直接使用你输入的描述/tags。',
         'series-ok': '已扣除 {0} P 点，共 {1} 张连续图（seed={2}）',
         'model-usage': '当前模型：{0}\n可用模型：\n{1}\n用法：p-draw 模型 <名称>（支持模糊匹配，如 anima-aesthetic）；p-draw 模型 默认 恢复默认。',
         'model-switched': '已切换为模型「{0}」，对之后的生图生效。',
@@ -245,6 +249,7 @@ exports.Config = Schema.object({
   img2imgDenoise: Schema.number().default(0.55).description('普通以图生图（p-draw i2i）的去噪强度，越小越接近原图（建议 0.4-0.7）'),
   i2iMode: Schema.string().default('ask').description('i2i 模式选择方式：ask=每次询问 / style=直接换风格（漫画化）/ ootd=直接换装换姿势 / plain=普通 img2img'),
   i2iAskTimeout: Schema.number().default(60).description('i2i 模式询问等待时间（秒）'),
+  seriesAskTimeout: Schema.number().default(60).description('连续图 LLM 使用确认等待时间（秒）'),
   i2iStyleDenoise: Schema.number().default(0.75).description('换风格模式（漫画化）的去噪强度，越大风格变化越彻底（建议 0.7-0.85）'),
   i2iOotdDenoise: Schema.number().default(0.55).description('换装换姿势模式（保留角色）的去噪强度（建议 0.5-0.6）'),
   i2iControlNetStrength: Schema.number().default(0.7).description('换风格模式的 ControlNet-LLLite 强度，越大构图锁得越死（建议 0.5-0.8；需安装 kohya-ss/ComfyUI-Anima-LLLite 节点与权重）'),
@@ -2666,6 +2671,20 @@ exports.apply = async function apply(ctx, cfg) {
 
   // 连续图/过程图主流程：同一角色多阶段（固定身份 + 阶段描述 + 全阶段共用同一 seed 保证一致性）
   // 语法：连续 <角色>：<阶段1> → <阶段2> → ...  或  连续 <角色>：<阶段1>|<阶段2>|...
+  // 询问是否使用 LLM 优化，返回 'yes' / 'no' / 'cancel' / null（无法交互或超时）
+  async function askSeriesLLMUse(session) {
+    if (typeof session.prompt !== 'function') return null
+    await session.send(session.text('.series-llm-ask'))
+    const reply = await session.prompt((cfg.seriesAskTimeout || 60) * 1000).catch(() => null)
+    const ans = String((reply && (reply.content != null ? reply.content : reply)) || '').trim()
+    if (/^(是|1|①|用|使用|使用llm|yes|y)$/i.test(ans)) return 'yes'
+    if (/^(否|2|②|不用|不使用|不使用llm|不优化|不用llm|no|n)$/i.test(ans)) return 'no'
+    if (/^(取消|3|③|算了|不生成|cancel|c)$/i.test(ans)) return 'cancel'
+    if (!ans) return null
+    await session.send(session.text('.series-llm-invalid'))
+    return askSeriesLLMUse(session)
+  }
+
   async function handleGenerateSeries(session, rawText) {
     const USERID = session.userId
     const isAdmin = isAdminUser(session)
@@ -2723,16 +2742,27 @@ exports.apply = async function apply(ctx, cfg) {
     const ready = await ensureComfyuiReady()
     if (!ready.ok) return ready.message
 
+    // 询问是否使用 LLM 优化：是=用 LLM / 否=直接使用原始描述 / 取消=不生成。
+    // 未配置 LLM 或平台不支持交互式询问时，沿用原有「配置了 LLM 就逐阶段优化」行为。
+    let useLLM = true
+    if (cfg.llmModel && cfg.llmBaseUrl && typeof session.prompt === 'function') {
+      const choice = await askSeriesLLMUse(session)
+      if (choice === 'cancel') return ''
+      if (choice === 'no') useLLM = false
+    }
+
     // 组装各阶段提示词：身份（含固定角色 tags）+ 阶段描述。
-    // 连续图**只要配置了 LLM 就强制逐阶段优化**（不受 promptOptimizeEnabled 限制），
-    // 因为 anima 是 Danbooru-tag 模型，中文阶段描述必须转成 tags 才能体现在画面里；
-    // 未配置 LLM 时退回原始中文描述。
+    // 使用 LLM 时逐阶段优化（不受 promptOptimizeEnabled 限制），因为 anima 是
+    // Danbooru-tag 模型，中文阶段描述必须转成 tags 才能体现在画面里；
+    // 用户选择「否」或未配置 LLM 时，直接使用各阶段原始描述（不注入身份前缀）。
     const fixedChars = parsePresetList(cfg.fixedCharacters)
     const stagePrompts = []
     let degradedStages = 0
     for (const st of stageList) {
       const base = identity ? `${identity}，${st}` : st
-      const result = await optimizeSeriesStage(base, identity)
+      const result = useLLM
+        ? await optimizeSeriesStage(base, identity)
+        : { ok: true, prompt: st, drops: [], reason: 'user_skipped_llm' }
       if (!result.ok) degradedStages += 1
       const stageTags = result.prompt || base
       const drops = result.drops || []
@@ -2769,6 +2799,7 @@ exports.apply = async function apply(ctx, cfg) {
     const notice = []
     if (clamped) notice.push(session.text('.batch-limit', [count]))
     if (identity && fixedChars[identity]) notice.push(`已固定角色「${identity}」的身份 tags，各阶段外观将保持一致。`)
+    if (!useLLM) notice.push(session.text('.series-no-llm'))
     if (degradedStages) notice.push(session.text('.prompt-degraded', ['（连续图阶段优化失败，已使用原始描述）']))
     if (cfg.queueEnabled) {
       notice.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
