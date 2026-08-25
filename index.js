@@ -3,7 +3,7 @@ const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
 const crypto = require('crypto')
-const { pathToFileURL } = require('url')
+const { pathToFileURL, fileURLToPath } = require('url')
 
 exports.name = 'p-draw'
 
@@ -203,17 +203,24 @@ exports.apply = async function apply(ctx, cfg) {
   // ---------------- 状态 ----------------
   let objectInfoCache = null
   let objectInfoCacheAt = 0
+  let objectInfoInFlight = null
 
   // /object_info 可能返回体巨大或接口本身很慢（自定义节点多），
   // 用短超时 + 10 分钟缓存，避免每次状态检查都干等。
+  // 并发请求共用同一个 in-flight promise，避免同一时刻重复请求 /object_info。
   async function getObjectInfoCached() {
     if (objectInfoCache && Date.now() - objectInfoCacheAt < 10 * 60 * 1000) {
       return objectInfoCache
     }
-    const data = await comfyGet('/object_info', 5000)
-    objectInfoCache = data
-    objectInfoCacheAt = Date.now()
-    return data
+    if (objectInfoInFlight) return objectInfoInFlight
+    objectInfoInFlight = comfyGet('/object_info', 5000)
+      .then((data) => {
+        objectInfoCache = data
+        objectInfoCacheAt = Date.now()
+        return data
+      })
+      .finally(() => { objectInfoInFlight = null })
+    return objectInfoInFlight
   }
 
   async function statusPayload() {
@@ -394,6 +401,107 @@ exports.apply = async function apply(ctx, cfg) {
       return { ok: false, message: `ComfyUI 未启动或无法连接（${baseUrl()}）。${hint}` }
     }
     return { ok: true }
+  }
+
+  // ---------------- 共享辅助（三大 handler 共用骨架，去重） ----------------
+
+  // 画师 tags 解析 + no artist 守卫（用户明确「不要画师/不要风格」时跳过）。
+  // 语义：与负面词里的 artist name（去签名/水印）无关，只响应用户的显式拒绝。
+  function resolveArtistTags(userPrompt, opts = {}) {
+    const presets = parsePresetList(cfg.artistPresets)
+    let artistTags = ''
+    if (cfg.activeArtistPreset && presets[cfg.activeArtistPreset]) {
+      artistTags = presets[cfg.activeArtistPreset]
+    } else if (cfg.defaultArtistTags) {
+      artistTags = String(cfg.defaultArtistTags).trim()
+    }
+    if (artistTags && !opts.skipGuard && NO_ARTIST_RE.test(String(userPrompt || ''))) return ''
+    return artistTags
+  }
+
+  function resolveStyleTags(userPrompt, opts = {}) {
+    if (!cfg.styleTags) return ''
+    if (!opts.skipGuard && NO_STYLE_RE.test(String(userPrompt || ''))) return ''
+    return String(cfg.styleTags).trim()
+  }
+
+  // P 点余额预检（单图/多人/连续共用）
+  async function precheckPoints(session, USERID, isAdmin, totalPrice) {
+    if (isAdmin) return { ok: true }
+    const notExists = await isAccountExists(USERID)
+    if (!notExists) return { ok: false, message: session.text('.account-notExists') }
+    const usersdata = await getPUser(USERID)
+    const saving = usersdata?.p || 0
+    if (saving < totalPrice) return { ok: false, message: session.text('.no-enough-p', [totalPrice]) }
+    return { ok: true }
+  }
+
+  // 预排队整批任务：先检查队列容量再入队，杜绝「部分入队后满、退款但任务仍执行」。
+  // 任一失败路径都按原逻辑退款（P 已在入队前扣除）。
+  async function enqueueBatch(count, work, { USERID, isAdmin, totalPrice }) {
+    const tasks = []
+    let firstPosition = null
+    if (!cfg.queueEnabled) return { ok: true, tasks, firstPosition }
+    const maxQueue = queueMax()
+    // 容量预检与入队循环之间没有 await，单线程内是原子的
+    if (maxQueue && queueInFlight + queueSize + count > maxQueue) {
+      if (!isAdmin) await refundP(USERID, totalPrice)
+      return { ok: false, message: `生成队列已满（最多 ${maxQueue} 个），本次请求已丢弃，请稍后再试。` }
+    }
+    for (let i = 0; i < count; i++) {
+      const q = enqueue(() => work(i))
+      if (!q.ok) {
+        if (!isAdmin) await refundP(USERID, totalPrice)
+        return { ok: false, message: q.message }
+      }
+      tasks.push(q.task)
+      if (firstPosition == null) firstPosition = q.position
+    }
+    return { ok: true, tasks, firstPosition }
+  }
+
+  // 即时反馈的公共部分（队列/生成中 + 张数 + 扣费），返回待发送的行
+  function feedbackBase(session, { firstPosition, count, totalPrice, isAdmin }) {
+    const rows = []
+    if (cfg.queueEnabled) {
+      rows.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
+      if (count > 1) rows.push(session.text('.batch-count', [count]))
+      if (!isAdmin) rows.push(session.text('.charged', [totalPrice]))
+    } else {
+      rows.push(session.text('.generating'))
+      if (count > 1) rows.push(session.text('.batch-count', [count]))
+      if (!isAdmin) rows.push(session.text('.charged', [totalPrice]))
+    }
+    return rows
+  }
+
+  async function sendNotices(session, notices) {
+    if (!notices.length) return
+    try {
+      await session.send(notices.filter(Boolean).join('\n'))
+    } catch (e) {
+      logger.warn(`发送反馈消息失败：${e.message}`)
+    }
+  }
+
+  // 发图：引用用户触发指令的原消息，失败回退普通发送
+  async function sendImagesWithQuote(session, outputs) {
+    const imageElements = outputs.map(src => h.image(src))
+    try {
+      await session.send(h.quote(session.messageId) + imageElements.join(''))
+    } catch (e) {
+      logger.warn(`发送图片失败（引用）：${e.message}`)
+      await session.send(imageElements)
+    }
+  }
+
+  // P 点读改写按用户串行化，避免并发指令互相覆盖余额
+  const userLocks = new Map()
+  function withUserLock(USERID, fn) {
+    const prev = userLocks.get(USERID) || Promise.resolve()
+    const next = prev.then(fn, fn)
+    userLocks.set(USERID, next.catch(() => {}))
+    return next
   }
 
   // ---------------- 用户自选模型 ----------------
@@ -645,7 +753,7 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
-  async function optimizePrompt(session, userPrompt, force = false, img2imgRule = '') {
+  async function optimizePrompt(session, userPrompt, force = false, img2imgRule = '', precomputedSearch = null) {
     if (!cfg.promptOptimizeEnabled && !force) {
       return { ok: true, prompt: userPrompt, reason: 'optimize_disabled' }
     }
@@ -654,7 +762,10 @@ exports.apply = async function apply(ctx, cfg) {
       return { ok: false, prompt: userPrompt, reason: 'llm_not_configured' }
     }
     let searchBlock = ''
-    if (wantsWebSearch(userPrompt)) {
+    if (precomputedSearch != null) {
+      // 批量按张优化时由调用方复用同一份搜索结果，避免重复请求 Tavily
+      searchBlock = precomputedSearch
+    } else if (wantsWebSearch(userPrompt)) {
       searchBlock = await webSearch(userPrompt)
     }
     const characterRule = buildCharacterRule(userPrompt)
@@ -783,19 +894,10 @@ exports.apply = async function apply(ctx, cfg) {
         }
       }
     }
-    const presets = parsePresetList(cfg.artistPresets)
-    let artistTags = ''
-    if (cfg.activeArtistPreset && presets[cfg.activeArtistPreset]) {
-      artistTags = presets[cfg.activeArtistPreset]
-    } else if (cfg.defaultArtistTags) {
-      artistTags = String(cfg.defaultArtistTags).trim()
-    }
-    if (artistTags && !/(不用我的风格|不要我的风格|不使用我的风格|不要画师词|不用画师词|不加画师词|no artist)/i.test(userPrompt)) {
-      parts.push(artistTags)
-    }
-    if (cfg.styleTags && !/(不用我的风格|不要我的风格|不使用我的风格)/i.test(userPrompt)) {
-      parts.push(String(cfg.styleTags).trim())
-    }
+    const artistTags = resolveArtistTags(userPrompt)
+    if (artistTags) parts.push(artistTags)
+    const styleTags = resolveStyleTags(userPrompt)
+    if (styleTags) parts.push(styleTags)
     parts.push(userPrompt)
     return { prompt: joinPromptParts(parts), degraded: false }
   }
@@ -1062,15 +1164,11 @@ exports.apply = async function apply(ctx, cfg) {
     const contentClean = cleanContentTags(commonContent, 65, false, [], true)
     const parts = []
     if (cfg.qualityPrefix) parts.push(String(cfg.qualityPrefix).trim())
-    const presets = parsePresetList(cfg.artistPresets)
-    let artistTags = ''
-    if (cfg.activeArtistPreset && presets[cfg.activeArtistPreset]) {
-      artistTags = presets[cfg.activeArtistPreset]
-    } else if (cfg.defaultArtistTags) {
-      artistTags = String(cfg.defaultArtistTags).trim()
-    }
+    // 多人同样遵守 no artist 守卫（与单图一致）：用户说「不要画师」时跳过画师 tags
+    const artistTags = resolveArtistTags(prompt)
     if (artistTags) parts.push(artistTags)
-    if (cfg.styleTags) parts.push(String(cfg.styleTags).trim())
+    const styleTags = resolveStyleTags(prompt)
+    if (styleTags) parts.push(styleTags)
     parts.push(contentClean || commonContent)
     if (characterTagStream.length) parts.push(characterTagStream.join(', '))
     let finalPrompt = joinPromptParts(parts)
@@ -1220,7 +1318,6 @@ exports.apply = async function apply(ctx, cfg) {
         break
       }
       currentImages = regen.outputs
-      currentPrompt = regen.finalPrompt || currentPrompt
     }
 
     // 多候选挑选
@@ -1298,13 +1395,8 @@ exports.apply = async function apply(ctx, cfg) {
     const count = parsedBatch.count
 
     // P 点校验（按总价 = 张数 × 单价）
-    if (!isAdmin) {
-      const notExists = await isAccountExists(USERID)
-      if (!notExists) return session.text('.account-notExists')
-      const usersdata = await getPUser(USERID)
-      const saving = usersdata?.p || 0
-      if (saving < count * price) return session.text('.no-enough-p', [count * price])
-    }
+    const pcheck = await precheckPoints(session, USERID, isAdmin, count * price)
+    if (!pcheck.ok) return pcheck.message
 
     // 未指定尺寸时按人数/接触关系自动选横图
     let size = parsedSize.size
@@ -1344,40 +1436,17 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 多人已扣除 ${count * price} P 点（${count} 张 × ${price}），余额 ${saving - count * price}`)
     }
 
-    // 队列：预排队全部任务，占满即退回总价
-    const queuedTasks = []
-    let firstPosition = null
-    if (cfg.queueEnabled) {
-      for (let i = 0; i < count; i++) {
-        const q = enqueue(() => runComfyGenerate(finalPrompt, size, { negativePrompt: multiNegative, unet }))
-        if (!q.ok) {
-          if (!isAdmin) await refundP(USERID, count * price)
-          return q.message
-        }
-        queuedTasks.push(q.task)
-        if (firstPosition == null) firstPosition = q.position
-      }
-    }
+    // 队列：预排队全部任务（先查容量再入队，占满整体退回总价）
+    const queued = await enqueueBatch(count, (i) => runComfyGenerate(finalPrompt, size, { negativePrompt: multiNegative, unet }), { USERID, isAdmin, totalPrice: count * price })
+    if (!queued.ok) return queued.message
+    const queuedTasks = queued.tasks
+    const firstPosition = queued.firstPosition
 
     // 即时反馈
     const notice = []
     if (parsedBatch.clamped) notice.push(session.text('.batch-limit', [count]))
-    if (cfg.queueEnabled) {
-      notice.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
-      if (count > 1) notice.push(session.text('.batch-count', [count]))
-      if (!isAdmin) notice.push(session.text('.charged', [count * price]))
-    } else {
-      notice.push(session.text('.generating'))
-      if (count > 1) notice.push(session.text('.batch-count', [count]))
-      if (!isAdmin) notice.push(session.text('.charged', [count * price]))
-    }
-    if (notice.length) {
-      try {
-        await session.send(notice.filter(Boolean).join('\n'))
-      } catch (e) {
-        logger.warn(`发送反馈消息失败：${e.message}`)
-      }
-    }
+    notice.push(...feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin }))
+    await sendNotices(session, notice)
 
     // 单张生成 +（可选）视觉校验
     const runOne = async (i) => {
@@ -1421,13 +1490,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (cfg.outputLogs) logger.success(`${USERID} 多人生成成功 ${successCount}/${count} 张`)
 
     // 发图：引用用户触发指令的原消息
-    const imageElements = allOutputs.map(src => h.image(src))
-    try {
-      await session.send(h.quote(session.messageId) + imageElements.join(''))
-    } catch (e) {
-      logger.warn(`发送多人图片失败：${e.message}`)
-      await session.send(imageElements)
-    }
+    await sendImagesWithQuote(session, allOutputs)
 
     const reply = []
     if (count > 1) {
@@ -1501,13 +1564,8 @@ exports.apply = async function apply(ctx, cfg) {
     const stageList = stages.slice(0, count)
 
     // P 点校验（按总价）
-    if (!isAdmin) {
-      const notExists = await isAccountExists(USERID)
-      if (!notExists) return session.text('.account-notExists')
-      const usersdata = await getPUser(USERID)
-      const saving = usersdata?.p || 0
-      if (saving < count * price) return session.text('.no-enough-p', [count * price])
-    }
+    const pcheck = await precheckPoints(session, USERID, isAdmin, count * price)
+    if (!pcheck.ok) return pcheck.message
 
     // ComfyUI 就绪
     const ready = await ensureComfyuiReady()
@@ -1551,20 +1609,11 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 连续图已扣除 ${count * price} P 点（${count} 阶段 × ${price}，seed=${seed}），余额 ${saving - count * price}`)
     }
 
-    // 队列：预排队全部阶段
-    const queuedTasks = []
-    let firstPosition = null
-    if (cfg.queueEnabled) {
-      for (let i = 0; i < count; i++) {
-        const q = enqueue(() => runComfyGenerate(stagePrompts[i], size, { seed, unet }))
-        if (!q.ok) {
-          if (!isAdmin) await refundP(USERID, count * price)
-          return q.message
-        }
-        queuedTasks.push(q.task)
-        if (firstPosition == null) firstPosition = q.position
-      }
-    }
+    // 队列：预排队全部阶段（先查容量再入队）
+    const queued = await enqueueBatch(count, (i) => runComfyGenerate(stagePrompts[i], size, { seed, unet }), { USERID, isAdmin, totalPrice: count * price })
+    if (!queued.ok) return queued.message
+    const queuedTasks = queued.tasks
+    const firstPosition = queued.firstPosition
 
     // 即时反馈
     const notice = []
@@ -1572,22 +1621,8 @@ exports.apply = async function apply(ctx, cfg) {
     if (identity && fixedChars[identity]) notice.push(`已固定角色「${identity}」的身份 tags，各阶段外观将保持一致。`)
     if (!useLLM) notice.push(session.text('.series-no-llm'))
     if (degradedStages) notice.push(session.text('.prompt-degraded', ['（连续图阶段优化失败，已使用原始描述）']))
-    if (cfg.queueEnabled) {
-      notice.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
-      if (count > 1) notice.push(session.text('.batch-count', [count]))
-      if (!isAdmin) notice.push(session.text('.charged', [count * price]))
-    } else {
-      notice.push(session.text('.generating'))
-      if (count > 1) notice.push(session.text('.batch-count', [count]))
-      if (!isAdmin) notice.push(session.text('.charged', [count * price]))
-    }
-    if (notice.length) {
-      try {
-        await session.send(notice.filter(Boolean).join('\n'))
-      } catch (e) {
-        logger.warn(`发送反馈消息失败：${e.message}`)
-      }
-    }
+    notice.push(...feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin }))
+    await sendNotices(session, notice)
 
     // 单阶段生成（共用 seed）
     const runOne = async (i) => {
@@ -1623,13 +1658,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (cfg.outputLogs) logger.success(`${USERID} 连续图生成成功 ${successCount}/${count} 阶段（seed=${seed}）`)
 
     // 发图：引用用户触发指令的原消息
-    const imageElements = allOutputs.map(src => h.image(src))
-    try {
-      await session.send(h.quote(session.messageId) + imageElements.join(''))
-    } catch (e) {
-      logger.warn(`发送连续图失败：${e.message}`)
-      await session.send(imageElements)
-    }
+    await sendImagesWithQuote(session, allOutputs)
 
     const reply = []
     reply.push(session.text('.series-ok', [count * price, successCount, seed]))
@@ -1698,16 +1727,20 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   async function deductP(USERID, amount) {
-    const user = await getPUser(USERID)
-    const current = user?.p || 0
-    await ctx.database.set('p_system', { userid: USERID }, { p: Math.max(0, current - amount) })
-    return current
+    return withUserLock(USERID, async () => {
+      const user = await getPUser(USERID)
+      const current = user?.p || 0
+      await ctx.database.set('p_system', { userid: USERID }, { p: Math.max(0, current - amount) })
+      return current
+    })
   }
 
   async function refundP(USERID, amount) {
-    const user = await getPUser(USERID)
-    const current = user?.p || 0
-    await ctx.database.set('p_system', { userid: USERID }, { p: current + amount })
+    return withUserLock(USERID, async () => {
+      const user = await getPUser(USERID)
+      const current = user?.p || 0
+      await ctx.database.set('p_system', { userid: USERID }, { p: current + amount })
+    })
   }
 
   // ---------------- 画师组/角色管理（持久化到数据库，避免 scope.update 触发重载） ----------------
@@ -2029,7 +2062,13 @@ exports.apply = async function apply(ctx, cfg) {
     if (!src) return null
     try {
       if (/^file:\/\//i.test(src)) {
-        const filePath = src.replace(/^file:\/\//i, '')
+        // 修复：Windows 下 file:///K:/... 用 replace 会得到 /K:/...（无法读取），用 fileURLToPath 解析
+        let filePath
+        try {
+          filePath = fileURLToPath(src)
+        } catch (e) {
+          filePath = src.replace(/^file:\/\//i, '')
+        }
         const buffer = await fsp.readFile(filePath)
         return { buffer, ext: path.extname(filePath) || '.png' }
       }
@@ -2162,13 +2201,9 @@ exports.apply = async function apply(ctx, cfg) {
     const count = parsedBatch.count
 
     // P 点校验（按总价 = 张数 × 单价）
-    if (!isAdmin) {
-      const notExists = await isAccountExists(USERID)
-      if (!notExists) return session.text('.account-notExists')
-      const usersdata = await getPUser(USERID)
-      const saving = usersdata?.p || 0
-      if (saving < count * cfg.price) return session.text('.no-enough-p', [count * cfg.price])
-    }
+    // P 点校验（按总价 = 张数 × 单价）
+    const pcheck = await precheckPoints(session, USERID, isAdmin, count * cfg.price)
+    if (!pcheck.ok) return pcheck.message
 
     // 原样模式
     const stripped = stripRawPrefix(text)
@@ -2258,27 +2293,21 @@ exports.apply = async function apply(ctx, cfg) {
       ? { i2iImage, i2i: { mode: (i2iOpts && i2iOpts.mode) || 'plain', denoise: denoise != null ? denoise : null, caps: (i2iOpts && i2iOpts.caps) || null } }
       : {}
 
-    // 队列：预排队全部任务，占满即退回总价
-    const queuedTasks = []
-    let firstPosition = null
-    if (cfg.queueEnabled) {
-      for (let i = 0; i < count; i++) {
-        const q = enqueue(async () => {
-          let p = finalPrompt
-          if (perImageOptimize) {
-            const optimized = await optimizePrompt(session, userPrompt, true, i2iRule)
-            p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
-          }
-          return runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun))
-        })
-        if (!q.ok) {
-          if (!isAdmin) await refundP(USERID, count * cfg.price)
-          return q.message
-        }
-        queuedTasks.push(q.task)
-        if (firstPosition == null) firstPosition = q.position
+    // 性能：按张优化（perImageOptimize）时联网搜索只做一次，各图复用同一份结果
+    const searchCache = perImageOptimize && wantsWebSearch(userPrompt) ? await webSearch(userPrompt) : null
+
+    // 队列：预排队全部任务（先查容量再入队，占满整体退回总价）
+    const queued = await enqueueBatch(count, async (i) => {
+      let p = finalPrompt
+      if (perImageOptimize) {
+        const optimized = await optimizePrompt(session, userPrompt, true, i2iRule, searchCache)
+        p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
-    }
+      return runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun))
+    }, { USERID, isAdmin, totalPrice: count * cfg.price })
+    if (!queued.ok) return queued.message
+    const queuedTasks = queued.tasks
+    const firstPosition = queued.firstPosition
 
     // 先发一条即时反馈（扣费结果 / 队列位置 / 降级提示），
     // 确保用户不会以为指令没反应。
@@ -2297,28 +2326,14 @@ exports.apply = async function apply(ctx, cfg) {
       notice.push(session.text('.no-optimize', [reasons[noOptimizeReason] || noOptimizeReason]))
     }
     if (parsedBatch.clamped) notice.push(session.text('.batch-limit', [count]))
-    if (cfg.queueEnabled) {
-      notice.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
-      if (count > 1) notice.push(session.text('.batch-count', [count]))
-      if (!isAdmin) notice.push(session.text('.charged', [count * cfg.price]))
-    } else {
-      notice.push(session.text('.generating'))
-      if (count > 1) notice.push(session.text('.batch-count', [count]))
-      if (!isAdmin) notice.push(session.text('.charged', [count * cfg.price]))
-    }
-    if (notice.length) {
-      try {
-        await session.send(notice.filter(Boolean).join('\n'))
-      } catch (e) {
-        logger.warn(`发送反馈消息失败：${e.message}`)
-      }
-    }
+    notice.push(...feedbackBase(session, { firstPosition, count, totalPrice: count * cfg.price, isAdmin }))
+    await sendNotices(session, notice)
 
     // 单张生成
     const runOne = async (i) => {
       let p = finalPrompt
       if (perImageOptimize) {
-        const optimized = await optimizePrompt(session, userPrompt, true, i2iRule)
+        const optimized = await optimizePrompt(session, userPrompt, true, i2iRule, searchCache)
         p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
       let result
@@ -2352,14 +2367,8 @@ exports.apply = async function apply(ctx, cfg) {
 
     if (cfg.outputLogs) logger.success(`${USERID} 生成成功 ${successCount}/${count} 张`)
 
-    const imageElements = allOutputs.map(src => h.image(src))
-    // 引用用户触发指令的原消息
-    try {
-      await session.send(h.quote(session.messageId) + imageElements.join(''))
-    } catch (e) {
-      logger.warn(`发送图片失败（引用）：${e.message}`)
-      await session.send(imageElements)
-    }
+    // 发图：引用用户触发指令的原消息
+    await sendImagesWithQuote(session, allOutputs)
 
     const reply = []
     if (count > 1) {
@@ -2400,13 +2409,13 @@ exports.apply = async function apply(ctx, cfg) {
       // 没券/券不足：问是否购买（显示价格）；拒绝一次再警告并问第二次，再拒绝直接生图
       const askBuy = async () => {
         await session.send(session.text('.coupon-ask-buy', [count, tokens, couponPrice, count * couponPrice]))
-        const reply = await session.prompt(cfg.couponAskTimeout * 1000)
+        const reply = await session.prompt(cfg.couponAskTimeout * 1000).catch(() => null)
         return normalizeConfirm(reply)
       }
       let ans = await askBuy()
       if (ans === false) {
         await session.send(session.text('.coupon-buy-warn'))
-        const reply = await session.prompt(cfg.couponAskTimeout * 1000)
+        const reply = await session.prompt(cfg.couponAskTimeout * 1000).catch(() => null)
         ans = normalizeConfirm(reply)
         if (ans !== true) {
           await session.send(session.text('.coupon-buy-cancelled'))
@@ -2464,8 +2473,15 @@ exports.apply = async function apply(ctx, cfg) {
     return null
   }
 
-  // 提示词优化券单价：优先读 data/p-shop.json 里覆盖的价格，否则用配置 couponPrice
+  // 提示词优化券单价：优先读 data/p-shop.json 里覆盖的价格，否则用配置 couponPrice。
+  // 加 60 秒 TTL 缓存，避免每次购买询问都同步读盘。
+  let couponPriceCache = null
+  let couponPriceCacheAt = 0
   async function resolveCouponPrice() {
+    if (couponPriceCache != null && Date.now() - couponPriceCacheAt < 60 * 1000) {
+      return couponPriceCache
+    }
+    let price = cfg.couponPrice
     const candidates = [
       path.join(ctx.baseDir, 'data', 'p-shop.json'),
       path.join(process.cwd(), 'data', 'p-shop.json'),
@@ -2476,14 +2492,19 @@ exports.apply = async function apply(ctx, cfg) {
           const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
           if (data && typeof data === 'object') {
             const item = data['提示词优化券']
-            if (item && typeof item.price === 'number' && item.price > 0) return item.price
+            if (item && typeof item.price === 'number' && item.price > 0) {
+              price = item.price
+              break
+            }
           }
         }
       } catch (e) {
         logger.warn(`读取 p-shop.json 价格失败：${e.message}`)
       }
     }
-    return cfg.couponPrice
+    couponPriceCache = price
+    couponPriceCacheAt = Date.now()
+    return price
   }
 
   // 启动时合并数据库里保存的运行时配置（画师组/固定角色）
