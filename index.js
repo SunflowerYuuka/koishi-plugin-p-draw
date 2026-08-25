@@ -1262,7 +1262,7 @@ function parseMultiPersonPlan(text) {
 function renderMultiPersonCharacter(character, opts = {}) {
   const {
     alias = '', resolvedIdentity = '', fixedTags = '', groupedContact = false,
-    explicitPositions = false, identityAnchors = [], includePose = true,
+    explicitPositions = false, identityAnchors = [], includePose = true, asTagStream = false,
   } = opts
   let label = String(alias || character.visual_label || character.role || '').trim()
   if (explicitPositions && character.slot) label = `${character.slot} ${label}`
@@ -1283,6 +1283,7 @@ function renderMultiPersonCharacter(character, opts = {}) {
   if (includePose && character.pose) details.push(character.pose)
   if (character.props && character.props.length) details.push(...character.props)
   const joined = details.filter(Boolean).join(', ')
+  if (asTagStream) return [label, joined].filter(Boolean).join(', ')
   return `${label}: ${joined}.`
 }
 
@@ -2125,7 +2126,7 @@ exports.apply = async function apply(ctx, cfg) {
     const aliases = ['Character A', 'Character B', 'Character C', 'Character D']
     const characterCount = plan.characters.length
     const characterRoles = []
-    const characterBlocks = []
+    const characterTagStream = []
     const characterEntityNames = []
     let groupedContact = plan.spatial_mode === 'shared_contact'
     const explicitPositionRequested = /左边|右边|左侧|右侧|前景|后方|前后站位|\bon\s+the\s+(?:left|right)\b|\bforeground\b|\bbackground\b/i.test(prompt)
@@ -2193,7 +2194,7 @@ exports.apply = async function apply(ctx, cfg) {
       )
 
       characterEntityNames.push(new Set([character.name, character.danbooru_candidate, fixedName, resolvedIdentity].filter(Boolean)))
-      characterBlocks.push(renderMultiPersonCharacter(character, {
+      characterTagStream.push(renderMultiPersonCharacter(character, {
         alias: visualLabel,
         resolvedIdentity,
         fixedTags: fixedName ? fixedTags : '',
@@ -2201,6 +2202,7 @@ exports.apply = async function apply(ctx, cfg) {
         explicitPositions: spatialMode === 'explicit_positions',
         identityAnchors: renderedIdentityTags,
         includePose: !groupedContact,
+        asTagStream: true,
       }))
     }
 
@@ -2274,7 +2276,6 @@ exports.apply = async function apply(ctx, cfg) {
       return displayed
     })
 
-    const sceneGuard = 'The composition shows one shared continuous moment.'
     let relativePosition = ''
     if (spatialMode === 'explicit_positions' && characterCount === 2) {
       const slotAliases = {}
@@ -2286,9 +2287,9 @@ exports.apply = async function apply(ctx, cfg) {
       }
     }
 
-    const narrativeBlocks = [...characterBlocks, ...displayInteractions, relativePosition, sceneGuard].filter(Boolean)
+    const narrativeBlocks = [...displayInteractions, relativePosition].filter(Boolean)
 
-    // 组装最终提示词：质量词 + 画师组 + content + narrative 块
+    // 组装最终提示词：质量词 + 画师组 + 主 tag 流（含角色外观）+ narrative 块（仅互动/站位）
     const contentClean = cleanContentTags(commonContent, 65, false, [], true)
     const parts = []
     if (cfg.qualityPrefix) parts.push(String(cfg.qualityPrefix).trim())
@@ -2302,6 +2303,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (artistTags) parts.push(artistTags)
     if (cfg.styleTags) parts.push(String(cfg.styleTags).trim())
     parts.push(contentClean || commonContent)
+    if (characterTagStream.length) parts.push(characterTagStream.join(', '))
     let finalPrompt = joinPromptParts(parts)
     if (narrativeBlocks.length) finalPrompt += '\n\n' + narrativeBlocks.join('\n\n')
     return { ok: true, prompt: finalPrompt }
