@@ -4,12 +4,14 @@ const assert = require('node:assert')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const { pathToFileURL } = require('url')
 
 const parse = require('../lib/parse')
 const tags = require('../lib/tags')
 const wf = require('../lib/workflows')
 const comfy = require('../lib/comfy')
 const multi = require('../lib/multi')
+const media = require('../lib/media')
 
 // ---------------- parse.js ----------------
 
@@ -227,6 +229,21 @@ test('outputImages', () => {
   const imgs = comfy.outputImages(history)
   assert.deepStrictEqual(imgs.map(i => i.filename).sort(), ['a.png', 'b.png', 'c.png'])
   assert.deepStrictEqual(comfy.outputImages({}), [])
+})
+
+test('materializeImageSource converts local file URLs to buffers', async () => {
+  const filePath = path.join(os.tmpdir(), 'pdraw.png')
+  const source = await media.materializeImageSource(pathToFileURL(filePath).href, async (resolvedPath) => {
+    assert.strictEqual(path.resolve(resolvedPath), path.resolve(filePath))
+    return Buffer.from('png-data')
+  })
+  assert.ok(Buffer.isBuffer(source))
+  assert.strictEqual(source.toString(), 'png-data')
+})
+
+test('materializeImageSource preserves non-file image sources', async () => {
+  const source = 'https://example.com/image.png'
+  assert.strictEqual(await media.materializeImageSource(source), source)
 })
 
 // ---------------- multi.js ----------------

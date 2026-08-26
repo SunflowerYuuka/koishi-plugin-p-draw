@@ -150,6 +150,7 @@ const {
   animaOotdI2IWorkflow, buildI2IWorkflow, customWorkflow,
 } = require('./lib/workflows')
 const { outputImages, waitComfyResult } = require('./lib/comfy')
+const { materializeImageSource } = require('./lib/media')
 const {
   MULTI_PERSON_NEGATIVE_TAGS, buildMultiPersonPlanPrompt, parseMultiPersonPlan,
   renderMultiPersonCharacter, multiPersonAutoSize,
@@ -486,7 +487,10 @@ exports.apply = async function apply(ctx, cfg) {
 
   // 发图：引用用户触发指令的原消息，失败回退普通发送
   async function sendImagesWithQuote(session, outputs) {
-    const imageElements = outputs.map(src => h.image(src))
+    const imageElements = await Promise.all(outputs.map(async (src) => {
+      const materialized = await materializeImageSource(src)
+      return Buffer.isBuffer(materialized) ? h.image(materialized) : h.image(src)
+    }))
     try {
       await session.send(h.quote(session.messageId) + imageElements.join(''))
     } catch (e) {
