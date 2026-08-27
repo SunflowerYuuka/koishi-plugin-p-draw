@@ -148,6 +148,34 @@ test('animaI2IWorkflow via apply', () => {
   assert.strictEqual(w['19'].inputs.seed, 7)
 })
 
+test('generated images are sent as an unquoted forward message', async () => {
+  const sent = []
+  const session = {
+    messageId: '1742313783',
+    send: async (message) => { sent.push(message) },
+  }
+  await iface.sendImagesAsForward(session, ['file:///tmp/a.png'])
+  assert.strictEqual(sent.length, 1)
+  assert.strictEqual(sent[0].type, 'figure')
+  assert.strictEqual(sent[0].children.length, 1)
+  assert.ok(sent[0].children[0].type === 'img')
+  assert.ok(!sent[0].children.some(child => child.type === 'quote'))
+})
+
+test('charged notice is quoted but remains a normal message', async () => {
+  const sent = []
+  const session = {
+    messageId: '1742313783',
+    text: (key) => key === '.charged' ? '已扣除 500 P 点' : key,
+    send: async (message) => { sent.push(message) },
+  }
+  await iface.sendNotices(session, ['已扣除 500 P 点'], { quote: true })
+  assert.strictEqual(sent.length, 1)
+  assert.ok(typeof sent[0] === 'string')
+  assert.ok(sent[0].includes('quote:1742313783'))
+  assert.ok(sent[0].includes('已扣除 500 P 点'))
+})
+
 test('i18n dict present via Config', () => {
   assert.ok(plugin.Config)
   assert.ok(plugin.Config.i18nDict['zh-CN']['commands']['p-draw']['messages']['generating'])

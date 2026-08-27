@@ -461,40 +461,43 @@ exports.apply = async function apply(ctx, cfg) {
     return { ok: true, tasks, firstPosition }
   }
 
-  // 即时反馈的公共部分（队列/生成中 + 张数 + 扣费），返回待发送的行
+  // 即时反馈的公共部分。扣费提醒单独返回，随后以引用消息发送。
   function feedbackBase(session, { firstPosition, count, totalPrice, isAdmin }) {
-    const rows = []
+    const notices = []
     if (cfg.queueEnabled) {
-      rows.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
-      if (count > 1) rows.push(session.text('.batch-count', [count]))
-      if (!isAdmin) rows.push(session.text('.charged', [totalPrice]))
+      notices.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
+      if (count > 1) notices.push(session.text('.batch-count', [count]))
     } else {
-      rows.push(session.text('.generating'))
-      if (count > 1) rows.push(session.text('.batch-count', [count]))
-      if (!isAdmin) rows.push(session.text('.charged', [totalPrice]))
+      notices.push(session.text('.generating'))
+      if (count > 1) notices.push(session.text('.batch-count', [count]))
     }
-    return rows
+    return {
+      notices,
+      chargeNotice: isAdmin ? '' : session.text('.charged', [totalPrice]),
+    }
   }
 
-  async function sendNotices(session, notices) {
-    if (!notices.length) return
+  async function sendNotices(session, notices, opts = {}) {
+    const content = notices.filter(Boolean).join('\n')
+    if (!content) return
     try {
-      await session.send(notices.filter(Boolean).join('\n'))
+      const message = opts.quote && session.messageId ? h.quote(session.messageId) + content : content
+      await session.send(message)
     } catch (e) {
       logger.warn(`发送反馈消息失败：${e.message}`)
     }
   }
 
-  // 发图：引用用户触发指令的原消息，失败回退普通发送
-  async function sendImagesWithQuote(session, outputs) {
+  // 生成图片使用合并转发；不附原消息引用。发送失败时回退普通图片消息。
+  async function sendImagesAsForward(session, outputs) {
     const imageElements = await Promise.all(outputs.map(async (src) => {
       const materialized = await materializeImageSource(src)
       return Buffer.isBuffer(materialized) ? h.image(materialized) : h.image(src)
     }))
     try {
-      await session.send(h.quote(session.messageId) + imageElements.join(''))
+      await session.send(h('figure', imageElements))
     } catch (e) {
-      logger.warn(`发送图片失败（引用）：${e.message}`)
+      logger.warn(`发送转发图片失败：${e.message}`)
       await session.send(imageElements)
     }
   }
@@ -1449,8 +1452,10 @@ exports.apply = async function apply(ctx, cfg) {
     // 即时反馈
     const notice = []
     if (parsedBatch.clamped) notice.push(session.text('.batch-limit', [count]))
-    notice.push(...feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin }))
+    const feedback = feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin })
+    notice.push(...feedback.notices)
     await sendNotices(session, notice)
+    await sendNotices(session, [feedback.chargeNotice], { quote: true })
 
     // 单张生成 +（可选）视觉校验
     const runOne = async (i) => {
@@ -1493,8 +1498,8 @@ exports.apply = async function apply(ctx, cfg) {
 
     if (cfg.outputLogs) logger.success(`${USERID} 多人生成成功 ${successCount}/${count} 张`)
 
-    // 发图：引用用户触发指令的原消息
-    await sendImagesWithQuote(session, allOutputs)
+    // 发图：合并转发，不引用原指令
+    await sendImagesAsForward(session, allOutputs)
 
     const reply = []
     if (count > 1) {
@@ -1625,8 +1630,10 @@ exports.apply = async function apply(ctx, cfg) {
     if (identity && fixedChars[identity]) notice.push(`已固定角色「${identity}」的身份 tags，各阶段外观将保持一致。`)
     if (!useLLM) notice.push(session.text('.series-no-llm'))
     if (degradedStages) notice.push(session.text('.prompt-degraded', ['（连续图阶段优化失败，已使用原始描述）']))
-    notice.push(...feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin }))
+    const feedback = feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin })
+    notice.push(...feedback.notices)
     await sendNotices(session, notice)
+    await sendNotices(session, [feedback.chargeNotice], { quote: true })
 
     // 单阶段生成（共用 seed）
     const runOne = async (i) => {
@@ -1661,8 +1668,8 @@ exports.apply = async function apply(ctx, cfg) {
 
     if (cfg.outputLogs) logger.success(`${USERID} 连续图生成成功 ${successCount}/${count} 阶段（seed=${seed}）`)
 
-    // 发图：引用用户触发指令的原消息
-    await sendImagesWithQuote(session, allOutputs)
+    // 发图：合并转发，不引用原指令
+    await sendImagesAsForward(session, allOutputs)
 
     const reply = []
     reply.push(session.text('.series-ok', [count * price, successCount, seed]))
@@ -2330,8 +2337,10 @@ exports.apply = async function apply(ctx, cfg) {
       notice.push(session.text('.no-optimize', [reasons[noOptimizeReason] || noOptimizeReason]))
     }
     if (parsedBatch.clamped) notice.push(session.text('.batch-limit', [count]))
-    notice.push(...feedbackBase(session, { firstPosition, count, totalPrice: count * cfg.price, isAdmin }))
+    const feedback = feedbackBase(session, { firstPosition, count, totalPrice: count * cfg.price, isAdmin })
+    notice.push(...feedback.notices)
     await sendNotices(session, notice)
+    await sendNotices(session, [feedback.chargeNotice], { quote: true })
 
     // 单张生成
     const runOne = async (i) => {
@@ -2371,8 +2380,8 @@ exports.apply = async function apply(ctx, cfg) {
 
     if (cfg.outputLogs) logger.success(`${USERID} 生成成功 ${successCount}/${count} 张`)
 
-    // 发图：引用用户触发指令的原消息
-    await sendImagesWithQuote(session, allOutputs)
+    // 发图：合并转发，不引用原指令
+    await sendImagesAsForward(session, allOutputs)
 
     const reply = []
     if (count > 1) {
@@ -2525,5 +2534,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, handleGenerateI2I, extractImageFromSession, uploadImageToComfyui, taggerImage, animaI2IWorkflow, animaStyleI2IWorkflow, animaOotdI2IWorkflow, buildI2IWorkflow, detectI2ICapabilities, parseDenoise }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, handleGenerateI2I, extractImageFromSession, uploadImageToComfyui, taggerImage, animaI2IWorkflow, animaStyleI2IWorkflow, animaOotdI2IWorkflow, buildI2IWorkflow, detectI2ICapabilities, parseDenoise, sendNotices, sendImagesAsForward }
 }
