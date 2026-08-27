@@ -148,17 +148,25 @@ test('animaI2IWorkflow via apply', () => {
   assert.strictEqual(w['19'].inputs.seed, 7)
 })
 
-test('generated images are sent as an unquoted forward message', async () => {
+test('generated images and their prompts are sent as paired forward nodes', async () => {
   const sent = []
   const session = {
     messageId: '1742313783',
     send: async (message) => { sent.push(message) },
   }
-  await iface.sendImagesAsForward(session, ['file:///tmp/a.png'])
+  await iface.sendImagesAsForward(session, [
+    { src: 'https://example.com/a.png', prompt: '1girl, blue eyes' },
+    { src: 'https://example.com/b.png', prompt: '1girl, red eyes' },
+  ])
   assert.strictEqual(sent.length, 1)
   assert.strictEqual(sent[0].type, 'figure')
-  assert.strictEqual(sent[0].children.length, 1)
-  assert.ok(sent[0].children[0].type === 'img')
+  assert.strictEqual(sent[0].children.length, 4)
+  assert.strictEqual(sent[0].children[0].type, 'message')
+  assert.strictEqual(sent[0].children[0].children[0].type, 'img')
+  assert.strictEqual(sent[0].children[1].type, 'message')
+  assert.strictEqual(sent[0].children[1].children[0].attrs.content, '1girl, blue eyes')
+  assert.strictEqual(sent[0].children[2].children[0].type, 'img')
+  assert.strictEqual(sent[0].children[3].children[0].attrs.content, '1girl, red eyes')
   assert.ok(!sent[0].children.some(child => child.type === 'quote'))
 })
 
@@ -174,6 +182,15 @@ test('charged notice is quoted but remains a normal message', async () => {
   assert.ok(typeof sent[0] === 'string')
   assert.ok(sent[0].includes('quote:1742313783'))
   assert.ok(sent[0].includes('已扣除 500 P 点'))
+})
+
+test('batch execution preserves the exact prompt for every successful image', async () => {
+  const batch = await iface.executeBatch('tester', true, 2, 0, async (index) => ({
+    ok: true,
+    outputs: [`https://example.com/${index}.png`],
+    prompt: `prompt-${index}`,
+  }))
+  assert.deepStrictEqual(batch.results.map(item => item.prompt), ['prompt-0', 'prompt-1'])
 })
 
 test('i18n dict present via Config', () => {

@@ -488,17 +488,27 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
-  // 生成图片使用合并转发；不附原消息引用。发送失败时回退普通图片消息。
+  // 生成图片使用合并转发；每张图后紧跟实际使用的最终提示词，不附原消息引用。
   async function sendImagesAsForward(session, outputs) {
-    const imageElements = await Promise.all(outputs.map(async (src) => {
+    const nodes = []
+    const fallback = []
+    for (const output of outputs) {
+      const src = typeof output === 'string' ? output : output.src
+      const prompt = typeof output === 'string' ? '' : String(output.prompt || '')
       const materialized = await materializeImageSource(src)
-      return Buffer.isBuffer(materialized) ? h.image(materialized) : h.image(src)
-    }))
+      const image = Buffer.isBuffer(materialized) ? h.image(materialized) : h.image(src)
+      nodes.push(h('message', image))
+      fallback.push(image)
+      if (prompt) {
+        nodes.push(h('message', prompt))
+        fallback.push(prompt)
+      }
+    }
     try {
-      await session.send(h('figure', imageElements))
+      await session.send(h('figure', nodes))
     } catch (e) {
       logger.warn(`发送转发图片失败：${e.message}`)
-      await session.send(imageElements)
+      await session.send(fallback)
     }
   }
 
@@ -1189,7 +1199,7 @@ exports.apply = async function apply(ctx, cfg) {
     const verifyBaseUrl = String(cfg.verifyLlmBaseUrl || '').trim()
     const verifyModel = String(cfg.verifyLlmModel || '').trim()
     if (!verifyBaseUrl || !verifyModel) {
-      return { ok: true, degraded: true, message: '', verdict: null, outputs: images }
+      return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt }
     }
     const passScore = Math.max(0, Math.min(10, parseInt(cfg.multiVerifyPassScore) || 6))
     const candidateCount = Math.max(1, Math.min(3, parseInt(cfg.multiCandidateCount) || 2))
@@ -1297,11 +1307,11 @@ exports.apply = async function apply(ctx, cfg) {
         data = extractVerifyJson(reply)
       } catch (e) {
         logger.warn(`多人视觉校验失败：${e.message}`)
-        return { ok: true, degraded: true, message: session.text('.multi-verify-error', [String(e && e.message || e)]), verdict: null, outputs: images }
+        return { ok: true, degraded: true, message: session.text('.multi-verify-error', [String(e && e.message || e)]), verdict: null, outputs: images, prompt: currentPrompt }
       }
       if (!data) {
         logger.warn(`多人视觉校验返回无法解析：${reply.slice(0, 200)}`)
-        return { ok: true, degraded: true, message: '', verdict: null, outputs: images }
+        return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt: currentPrompt }
       }
       const verdict = verdictFromData(data)
       verdict.skipped = false
@@ -1335,7 +1345,7 @@ exports.apply = async function apply(ctx, cfg) {
     selectedOutputs = best.outputs
     selectedVerdict = best.verdict
     if (!multiAccepted && !cfg.multiSendDegradedCandidate) {
-      return { ok: false, discarded: true, message: session.text('.multi-verify-discarded'), verdict: selectedVerdict, outputs: [] }
+      return { ok: false, discarded: true, message: session.text('.multi-verify-discarded'), verdict: selectedVerdict, outputs: [], prompt: best.prompt }
     }
     const noteParts = []
     if (multiAccepted) {
@@ -1344,7 +1354,7 @@ exports.apply = async function apply(ctx, cfg) {
       noteParts.push(session.text('.multi-verify-degraded', selectedVerdict.issues.length ? '（' + selectedVerdict.issues.join('；').slice(0, 80) + '）' : ''))
     }
     if (retries) noteParts.push(session.text('.multi-verify-failed', [selectedVerdict.issues.length ? '：' + selectedVerdict.issues.join('；').slice(0, 80) : '', retries]))
-    return { ok: true, degraded: false, message: noteParts.join('\n'), verdict: selectedVerdict, outputs: selectedOutputs }
+    return { ok: true, degraded: false, message: noteParts.join('\n'), verdict: selectedVerdict, outputs: selectedOutputs, prompt: best.prompt }
   }
 
   function buildVerifySystemPrompt(multiPerson, planCount) {
@@ -1357,7 +1367,7 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   // 共享批量执行器：一次性扣除总价，逐张生成，单张失败只退该张单价。
-  // runOne(i) 需返回 { ok, outputs, seed, message? }；返回数组为多张输出（如视觉校验候选）。
+  // runOne(i) 需返回 { ok, outputs, seed, prompt, message? }；返回数组为多张输出（如视觉校验候选）。
   async function executeBatch(USERID, isAdmin, count, unitPrice, runOne) {
     const results = []
     let successCount = 0
@@ -1371,7 +1381,7 @@ exports.apply = async function apply(ctx, cfg) {
       const outputs = Array.isArray(item.outputs) ? item.outputs : (item.outputs ? [item.outputs] : [])
       if (item.ok && outputs.length) {
         successCount += 1
-        results.push({ i, ok: true, outputs, seed: item.seed, note: item.note || '' })
+        results.push({ i, ok: true, outputs, seed: item.seed, prompt: item.prompt || '', note: item.note || '' })
       } else {
         if (!isAdmin) await refundP(USERID, unitPrice)
         if (cfg.outputLogs) logger.warn(`批量第 ${i + 1} 张生成失败（${USERID}）：${item.message || '无输出'}`)
@@ -1467,23 +1477,25 @@ exports.apply = async function apply(ctx, cfg) {
       }
       if (!result.ok || !result.outputs || !result.outputs.length) return result
       if (!cfg.multiVerifyEnabled) {
-        return { ok: true, outputs: result.outputs, seed: result.seed, note: session.text('.multi-degraded', ['（未启用校验或未配置视觉模型）']) }
+        return { ok: true, outputs: result.outputs, seed: result.seed, prompt: finalPrompt, note: session.text('.multi-degraded', ['（未启用校验或未配置视觉模型）']) }
       }
       const verified = await verifyGeneratedImages(session, result.outputs, text, finalPrompt, size, plan.characters.length, unet)
       if (!verified.ok) return { ok: false, message: verified.message }
-      return { ok: true, outputs: verified.outputs, seed: result.seed, note: verified.message || '' }
+      return { ok: true, outputs: verified.outputs, seed: result.seed, prompt: verified.prompt || finalPrompt, note: verified.message || '' }
     }
 
     const { results, successCount } = await executeBatch(USERID, isAdmin, count, price, runOne)
 
     // 汇总
     const allOutputs = []
+    const forwardOutputs = []
     const notes = []
     const seeds = []
     const failures = []
     for (const item of results) {
       if (item.ok) {
         allOutputs.push(...item.outputs)
+        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || finalPrompt })))
         if (item.seed != null) seeds.push(item.seed)
         if (item.note) notes.push(item.note)
       } else {
@@ -1499,7 +1511,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (cfg.outputLogs) logger.success(`${USERID} 多人生成成功 ${successCount}/${count} 张`)
 
     // 发图：合并转发，不引用原指令
-    await sendImagesAsForward(session, allOutputs)
+    await sendImagesAsForward(session, forwardOutputs)
 
     const reply = []
     if (count > 1) {
@@ -1643,6 +1655,7 @@ exports.apply = async function apply(ctx, cfg) {
       } else {
         try { result = await runComfyGenerate(stagePrompts[i], size, { seed, unet }) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       }
+      result.prompt = stagePrompts[i]
       return result
     }
 
@@ -1650,11 +1663,13 @@ exports.apply = async function apply(ctx, cfg) {
 
     // 汇总
     const allOutputs = []
+    const forwardOutputs = []
     const seeds = []
     const failures = []
     for (const item of results) {
       if (item.ok) {
         allOutputs.push(...item.outputs)
+        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || stagePrompts[item.i] || '' })))
         if (item.seed != null) seeds.push(item.seed)
       } else {
         failures.push(`第 ${item.i + 1} 阶段：${item.message}`)
@@ -1669,7 +1684,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (cfg.outputLogs) logger.success(`${USERID} 连续图生成成功 ${successCount}/${count} 阶段（seed=${seed}）`)
 
     // 发图：合并转发，不引用原指令
-    await sendImagesAsForward(session, allOutputs)
+    await sendImagesAsForward(session, forwardOutputs)
 
     const reply = []
     reply.push(session.text('.series-ok', [count * price, successCount, seed]))
@@ -2314,7 +2329,8 @@ exports.apply = async function apply(ctx, cfg) {
         const optimized = await optimizePrompt(session, userPrompt, true, i2iRule, searchCache)
         p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
-      return runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun))
+      const generated = await runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun))
+      return { ...generated, prompt: p }
     }, { USERID, isAdmin, totalPrice: count * cfg.price })
     if (!queued.ok) return queued.message
     const queuedTasks = queued.tasks
@@ -2355,6 +2371,7 @@ exports.apply = async function apply(ctx, cfg) {
       } else {
         try { result = await runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun)) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       }
+      if (!result.prompt) result.prompt = p
       return result
     }
 
@@ -2362,11 +2379,13 @@ exports.apply = async function apply(ctx, cfg) {
 
     // 汇总
     const allOutputs = []
+    const forwardOutputs = []
     const seeds = []
     const failures = []
     for (const item of results) {
       if (item.ok) {
         allOutputs.push(...item.outputs)
+        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || finalPrompt })))
         if (item.seed != null) seeds.push(item.seed)
       } else {
         failures.push(`第 ${item.i + 1} 张：${item.message}`)
@@ -2381,7 +2400,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (cfg.outputLogs) logger.success(`${USERID} 生成成功 ${successCount}/${count} 张`)
 
     // 发图：合并转发，不引用原指令
-    await sendImagesAsForward(session, allOutputs)
+    await sendImagesAsForward(session, forwardOutputs)
 
     const reply = []
     if (count > 1) {
@@ -2534,5 +2553,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, handleGenerateI2I, extractImageFromSession, uploadImageToComfyui, taggerImage, animaI2IWorkflow, animaStyleI2IWorkflow, animaOotdI2IWorkflow, buildI2IWorkflow, detectI2ICapabilities, parseDenoise, sendNotices, sendImagesAsForward }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, handleGenerateI2I, extractImageFromSession, uploadImageToComfyui, taggerImage, animaI2IWorkflow, animaStyleI2IWorkflow, animaOotdI2IWorkflow, buildI2IWorkflow, detectI2ICapabilities, parseDenoise, sendNotices, sendImagesAsForward, executeBatch }
 }
