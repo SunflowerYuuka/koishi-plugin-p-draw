@@ -488,21 +488,21 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
-  // 生成图片使用合并转发；每张图后紧跟实际使用的最终提示词，不附原消息引用。
+  // 生成图片使用合并转发；每张图后紧跟实际使用的正负面提示词，不附原消息引用。
   async function sendImagesAsForward(session, outputs) {
     const nodes = []
     const fallback = []
     for (const output of outputs) {
       const src = typeof output === 'string' ? output : output.src
       const prompt = typeof output === 'string' ? '' : String(output.prompt || '')
+      const negativePrompt = typeof output === 'string' ? '' : String(output.negativePrompt || '')
       const materialized = await materializeImageSource(src)
       const image = Buffer.isBuffer(materialized) ? h.image(materialized) : h.image(src)
       nodes.push(h('message', image))
       fallback.push(image)
-      if (prompt) {
-        nodes.push(h('message', prompt))
-        fallback.push(prompt)
-      }
+      const promptText = `Positive:\n${prompt}\n\nNegative:\n${negativePrompt}`
+      nodes.push(h('message', promptText))
+      fallback.push(promptText)
     }
     try {
       await session.send(h('figure', nodes))
@@ -666,6 +666,7 @@ exports.apply = async function apply(ctx, cfg) {
       steps,
       cfg: cfgVal,
       prompt_id: promptId,
+      negativePrompt,
     }
   }
 
@@ -1195,11 +1196,11 @@ exports.apply = async function apply(ctx, cfg) {
 
   // 视觉校验（anima_verify + generation_verifier 移植）：对生成的图片跑视觉 LLM，
   // 不合格则用相同提示词重试（最多 multiCandidateCount 张），按多候选规则挑选并返回结果。
-  async function verifyGeneratedImages(session, images, userRequest, prompt, size, planCount, unet) {
+  async function verifyGeneratedImages(session, images, userRequest, prompt, size, planCount, unet, negativePrompt) {
     const verifyBaseUrl = String(cfg.verifyLlmBaseUrl || '').trim()
     const verifyModel = String(cfg.verifyLlmModel || '').trim()
     if (!verifyBaseUrl || !verifyModel) {
-      return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt }
+      return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt, negativePrompt }
     }
     const passScore = Math.max(0, Math.min(10, parseInt(cfg.multiVerifyPassScore) || 6))
     const candidateCount = Math.max(1, Math.min(3, parseInt(cfg.multiCandidateCount) || 2))
@@ -1210,6 +1211,7 @@ exports.apply = async function apply(ctx, cfg) {
     let retries = 0
     let currentImages = images
     let currentPrompt = prompt
+    let currentNegativePrompt = negativePrompt
 
     async function verifyOnce(imgs, userReq) {
       const controller = new AbortController()
@@ -1307,15 +1309,15 @@ exports.apply = async function apply(ctx, cfg) {
         data = extractVerifyJson(reply)
       } catch (e) {
         logger.warn(`多人视觉校验失败：${e.message}`)
-        return { ok: true, degraded: true, message: session.text('.multi-verify-error', [String(e && e.message || e)]), verdict: null, outputs: images, prompt: currentPrompt }
+        return { ok: true, degraded: true, message: session.text('.multi-verify-error', [String(e && e.message || e)]), verdict: null, outputs: images, prompt: currentPrompt, negativePrompt: currentNegativePrompt }
       }
       if (!data) {
         logger.warn(`多人视觉校验返回无法解析：${reply.slice(0, 200)}`)
-        return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt: currentPrompt }
+        return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt: currentPrompt, negativePrompt: currentNegativePrompt }
       }
       const verdict = verdictFromData(data)
       verdict.skipped = false
-      candidates.push({ outputs: currentImages, verdict, prompt: currentPrompt })
+      candidates.push({ outputs: currentImages, verdict, prompt: currentPrompt, negativePrompt: currentNegativePrompt })
       selectedOutputs = currentImages
       selectedVerdict = verdict
 
@@ -1329,12 +1331,13 @@ exports.apply = async function apply(ctx, cfg) {
       if (hint) {
         currentPrompt = `${userRequest}\n【上次问题，请修正】${hint}`
       }
-      const regen = await runComfyGenerate(currentPrompt, size, { unet })
+      const regen = await runComfyGenerate(currentPrompt, size, { unet, negativePrompt: currentNegativePrompt })
       if (!regen.ok) {
         logger.warn(`多人校验重试生成失败：${regen.message}`)
         break
       }
       currentImages = regen.outputs
+      currentNegativePrompt = regen.negativePrompt || currentNegativePrompt
     }
 
     // 多候选挑选
@@ -1345,7 +1348,7 @@ exports.apply = async function apply(ctx, cfg) {
     selectedOutputs = best.outputs
     selectedVerdict = best.verdict
     if (!multiAccepted && !cfg.multiSendDegradedCandidate) {
-      return { ok: false, discarded: true, message: session.text('.multi-verify-discarded'), verdict: selectedVerdict, outputs: [], prompt: best.prompt }
+      return { ok: false, discarded: true, message: session.text('.multi-verify-discarded'), verdict: selectedVerdict, outputs: [], prompt: best.prompt, negativePrompt: best.negativePrompt }
     }
     const noteParts = []
     if (multiAccepted) {
@@ -1354,7 +1357,7 @@ exports.apply = async function apply(ctx, cfg) {
       noteParts.push(session.text('.multi-verify-degraded', selectedVerdict.issues.length ? '（' + selectedVerdict.issues.join('；').slice(0, 80) + '）' : ''))
     }
     if (retries) noteParts.push(session.text('.multi-verify-failed', [selectedVerdict.issues.length ? '：' + selectedVerdict.issues.join('；').slice(0, 80) : '', retries]))
-    return { ok: true, degraded: false, message: noteParts.join('\n'), verdict: selectedVerdict, outputs: selectedOutputs, prompt: best.prompt }
+    return { ok: true, degraded: false, message: noteParts.join('\n'), verdict: selectedVerdict, outputs: selectedOutputs, prompt: best.prompt, negativePrompt: best.negativePrompt }
   }
 
   function buildVerifySystemPrompt(multiPerson, planCount) {
@@ -1367,7 +1370,7 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   // 共享批量执行器：一次性扣除总价，逐张生成，单张失败只退该张单价。
-  // runOne(i) 需返回 { ok, outputs, seed, prompt, message? }；返回数组为多张输出（如视觉校验候选）。
+  // runOne(i) 需返回 { ok, outputs, seed, prompt, negativePrompt, message? }；返回数组为多张输出（如视觉校验候选）。
   async function executeBatch(USERID, isAdmin, count, unitPrice, runOne) {
     const results = []
     let successCount = 0
@@ -1381,7 +1384,7 @@ exports.apply = async function apply(ctx, cfg) {
       const outputs = Array.isArray(item.outputs) ? item.outputs : (item.outputs ? [item.outputs] : [])
       if (item.ok && outputs.length) {
         successCount += 1
-        results.push({ i, ok: true, outputs, seed: item.seed, prompt: item.prompt || '', note: item.note || '' })
+        results.push({ i, ok: true, outputs, seed: item.seed, prompt: item.prompt || '', negativePrompt: item.negativePrompt || '', note: item.note || '' })
       } else {
         if (!isAdmin) await refundP(USERID, unitPrice)
         if (cfg.outputLogs) logger.warn(`批量第 ${i + 1} 张生成失败（${USERID}）：${item.message || '无输出'}`)
@@ -1477,11 +1480,11 @@ exports.apply = async function apply(ctx, cfg) {
       }
       if (!result.ok || !result.outputs || !result.outputs.length) return result
       if (!cfg.multiVerifyEnabled) {
-        return { ok: true, outputs: result.outputs, seed: result.seed, prompt: finalPrompt, note: session.text('.multi-degraded', ['（未启用校验或未配置视觉模型）']) }
+        return { ok: true, outputs: result.outputs, seed: result.seed, prompt: finalPrompt, negativePrompt: result.negativePrompt, note: session.text('.multi-degraded', ['（未启用校验或未配置视觉模型）']) }
       }
-      const verified = await verifyGeneratedImages(session, result.outputs, text, finalPrompt, size, plan.characters.length, unet)
+      const verified = await verifyGeneratedImages(session, result.outputs, text, finalPrompt, size, plan.characters.length, unet, result.negativePrompt || multiNegative)
       if (!verified.ok) return { ok: false, message: verified.message }
-      return { ok: true, outputs: verified.outputs, seed: result.seed, prompt: verified.prompt || finalPrompt, note: verified.message || '' }
+      return { ok: true, outputs: verified.outputs, seed: result.seed, prompt: verified.prompt || finalPrompt, negativePrompt: verified.negativePrompt || result.negativePrompt || multiNegative, note: verified.message || '' }
     }
 
     const { results, successCount } = await executeBatch(USERID, isAdmin, count, price, runOne)
@@ -1495,7 +1498,7 @@ exports.apply = async function apply(ctx, cfg) {
     for (const item of results) {
       if (item.ok) {
         allOutputs.push(...item.outputs)
-        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || finalPrompt })))
+        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || finalPrompt, negativePrompt: item.negativePrompt })))
         if (item.seed != null) seeds.push(item.seed)
         if (item.note) notes.push(item.note)
       } else {
@@ -1669,7 +1672,7 @@ exports.apply = async function apply(ctx, cfg) {
     for (const item of results) {
       if (item.ok) {
         allOutputs.push(...item.outputs)
-        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || stagePrompts[item.i] || '' })))
+        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || stagePrompts[item.i] || '', negativePrompt: item.negativePrompt })))
         if (item.seed != null) seeds.push(item.seed)
       } else {
         failures.push(`第 ${item.i + 1} 阶段：${item.message}`)
@@ -2393,7 +2396,7 @@ exports.apply = async function apply(ctx, cfg) {
     for (const item of results) {
       if (item.ok) {
         allOutputs.push(...item.outputs)
-        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || finalPrompt })))
+        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || finalPrompt, negativePrompt: item.negativePrompt })))
         if (item.seed != null) seeds.push(item.seed)
       } else {
         failures.push(`第 ${item.i + 1} 张：${item.message}`)

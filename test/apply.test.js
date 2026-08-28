@@ -155,8 +155,8 @@ test('generated images and their prompts are sent as paired forward nodes', asyn
     send: async (message) => { sent.push(message) },
   }
   await iface.sendImagesAsForward(session, [
-    { src: 'https://example.com/a.png', prompt: '1girl, blue eyes' },
-    { src: 'https://example.com/b.png', prompt: '1girl, red eyes' },
+    { src: 'https://example.com/a.png', prompt: '1girl, blue eyes', negativePrompt: 'bad anatomy, watermark' },
+    { src: 'https://example.com/b.png', prompt: '1girl, red eyes', negativePrompt: '' },
   ])
   assert.strictEqual(sent.length, 1)
   assert.strictEqual(sent[0].type, 'figure')
@@ -164,9 +164,9 @@ test('generated images and their prompts are sent as paired forward nodes', asyn
   assert.strictEqual(sent[0].children[0].type, 'message')
   assert.strictEqual(sent[0].children[0].children[0].type, 'img')
   assert.strictEqual(sent[0].children[1].type, 'message')
-  assert.strictEqual(sent[0].children[1].children[0].attrs.content, '1girl, blue eyes')
+  assert.strictEqual(sent[0].children[1].children[0].attrs.content, 'Positive:\n1girl, blue eyes\n\nNegative:\nbad anatomy, watermark')
   assert.strictEqual(sent[0].children[2].children[0].type, 'img')
-  assert.strictEqual(sent[0].children[3].children[0].attrs.content, '1girl, red eyes')
+  assert.strictEqual(sent[0].children[3].children[0].attrs.content, 'Positive:\n1girl, red eyes\n\nNegative:\n')
   assert.ok(!sent[0].children.some(child => child.type === 'quote'))
 })
 
