@@ -161,6 +161,15 @@ test('joinPromptParts dedup', () => {
   assert.strictEqual(r.split('1girl').length - 1, 1)
 })
 
+test('mergeNegativePrompts keeps defaults and appends only new user tags', () => {
+  const merged = tags.mergeNegativePrompts(
+    'worst quality, low quality, score_1, artist name',
+    'low quality, bad anatomy, bad hands, watermark',
+  )
+  assert.strictEqual(merged, 'worst quality, low quality, score_1, artist name, bad anatomy, bad hands, watermark')
+  assert.strictEqual(tags.mergeNegativePrompts('worst quality, low quality', ''), 'worst quality, low quality')
+})
+
 // ---------------- workflows.js ----------------
 
 function baseCfg(extra = {}) {

@@ -142,7 +142,7 @@ const {
   stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
 } = require('./lib/parse')
 const {
-  splitTags, canonicalTagText, joinPromptParts, cleanContentTags, appendInlineProtectedTags,
+  splitTags, canonicalTagText, joinPromptParts, mergeNegativePrompts, cleanContentTags, appendInlineProtectedTags,
   NO_ARTIST_RE, NO_STYLE_RE,
 } = require('./lib/tags')
 const {
@@ -2320,11 +2320,11 @@ exports.apply = async function apply(ctx, cfg) {
     const i2iRun = i2iImage
       ? { i2iImage, i2i: { mode: (i2iOpts && i2iOpts.mode) || 'plain', denoise: denoise != null ? denoise : null, caps: (i2iOpts && i2iOpts.caps) || null } }
       : {}
-    // 用户手写了 negative: 区块时，只对本次生成覆盖插件默认负面词。
+    // 用户手写了 negative: 区块时，默认负面词仍保留；用户 tag 只补充未出现的部分。
     const generationOverrides = Object.assign(
       { unet, seed },
       i2iRun,
-      userNegativePrompt ? { negativePrompt: userNegativePrompt } : {},
+      userNegativePrompt ? { negativePrompt: mergeNegativePrompts(cfg.negativePrompt, userNegativePrompt) } : {},
     )
 
     // 性能：按张优化（perImageOptimize）时联网搜索只做一次，各图复用同一份结果
