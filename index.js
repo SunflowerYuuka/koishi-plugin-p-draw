@@ -139,7 +139,7 @@ exports.Config = Schema.object({
 // ------------------------------------------------------------------
 const {
   normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed, parseDenoise,
-  stripRawPrefix, parseNameTags, parsePresetList, mergeTagText,
+  stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
 } = require('./lib/parse')
 const {
   splitTags, canonicalTagText, joinPromptParts, cleanContentTags, appendInlineProtectedTags,
@@ -2234,7 +2234,9 @@ exports.apply = async function apply(ctx, cfg) {
     // 原样模式
     const stripped = stripRawPrefix(text)
     const raw = stripped.raw
-    const userPrompt = stripped.prompt
+    const promptSections = splitPositiveNegativePrompt(stripped.prompt)
+    const userPrompt = promptSections.positive
+    const userNegativePrompt = promptSections.negative
     if (!userPrompt) return session.text('.no-prompt')
 
     // ComfyUI 就绪
@@ -2318,6 +2320,12 @@ exports.apply = async function apply(ctx, cfg) {
     const i2iRun = i2iImage
       ? { i2iImage, i2i: { mode: (i2iOpts && i2iOpts.mode) || 'plain', denoise: denoise != null ? denoise : null, caps: (i2iOpts && i2iOpts.caps) || null } }
       : {}
+    // 用户手写了 negative: 区块时，只对本次生成覆盖插件默认负面词。
+    const generationOverrides = Object.assign(
+      { unet, seed },
+      i2iRun,
+      userNegativePrompt ? { negativePrompt: userNegativePrompt } : {},
+    )
 
     // 性能：按张优化（perImageOptimize）时联网搜索只做一次，各图复用同一份结果
     const searchCache = perImageOptimize && wantsWebSearch(userPrompt) ? await webSearch(userPrompt) : null
@@ -2329,7 +2337,7 @@ exports.apply = async function apply(ctx, cfg) {
         const optimized = await optimizePrompt(session, userPrompt, true, i2iRule, searchCache)
         p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
-      const generated = await runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun))
+      const generated = await runComfyGenerate(p, parsedSize.size, generationOverrides)
       return { ...generated, prompt: p }
     }, { USERID, isAdmin, totalPrice: count * cfg.price })
     if (!queued.ok) return queued.message
@@ -2369,7 +2377,7 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.queueEnabled) {
         try { result = await queuedTasks[i] } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       } else {
-        try { result = await runComfyGenerate(p, parsedSize.size, Object.assign({ unet, seed }, i2iRun)) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
+        try { result = await runComfyGenerate(p, parsedSize.size, generationOverrides) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       }
       if (!result.prompt) result.prompt = p
       return result

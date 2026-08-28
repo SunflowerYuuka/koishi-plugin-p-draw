@@ -74,6 +74,21 @@ test('stripRawPrefix', () => {
   assert.strictEqual(parse.stripRawPrefix('一个女孩').raw, false)
 })
 
+test('splitPositiveNegativePrompt separates a standalone negative block', () => {
+  const result = parse.splitPositiveNegativePrompt('masterpiece, 1girl, cat ears\n\nnegative:\nworst quality, bad anatomy, extra fingers')
+  assert.strictEqual(result.positive, 'masterpiece, 1girl, cat ears')
+  assert.strictEqual(result.negative, 'worst quality, bad anatomy, extra fingers')
+})
+
+test('splitPositiveNegativePrompt supports Chinese markers and does not split ordinary text', () => {
+  const chinese = parse.splitPositiveNegativePrompt('1girl\n负面提示词：\nblurry, watermark')
+  assert.strictEqual(chinese.positive, '1girl')
+  assert.strictEqual(chinese.negative, 'blurry, watermark')
+  const ordinary = parse.splitPositiveNegativePrompt('1girl, negative space, dark background')
+  assert.strictEqual(ordinary.positive, '1girl, negative space, dark background')
+  assert.strictEqual(ordinary.negative, '')
+})
+
 test('mergeTagText dedup', () => {
   const merged = parse.mergeTagText('@a, @b,', '@b, @c')
   assert.ok(merged.includes('@a'))
