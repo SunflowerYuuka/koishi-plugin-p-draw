@@ -151,6 +151,7 @@ const {
 } = require('./lib/workflows')
 const { outputImages, waitComfyResult } = require('./lib/comfy')
 const { materializeImageSource } = require('./lib/media')
+const { createSeriesStageRunner } = require('./lib/series')
 const {
   MULTI_PERSON_NEGATIVE_TAGS, buildMultiPersonPlanPrompt, parseMultiPersonPlan,
   renderMultiPersonCharacter, multiPersonAutoSize,
@@ -1633,8 +1634,27 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 连续图已扣除 ${count * price} P 点（${count} 阶段 × ${price}，seed=${seed}），余额 ${saving - count * price}`)
     }
 
+    // 连续图阶段串联：首阶段 T2I，后续阶段把上一阶段图片上传回 ComfyUI 后走普通 i2i。
+    // img2imgDenoise 作为链式阶段的去噪强度配置，默认沿用普通 i2i 的 0.55。
+    const seriesDenoise = Number(cfg.img2imgDenoise) || 0.55
+    const runSeriesStage = createSeriesStageRunner(stagePrompts, async ({ prompt, previousOutput }) => {
+      let inputImage = null
+      if (previousOutput) {
+        const materialized = await materializeImageSource(previousOutput)
+        if (!Buffer.isBuffer(materialized)) throw new Error('无法读取上一阶段图片，连续图已停止')
+        let ext = '.png'
+        try { ext = path.extname(fileURLToPath(previousOutput)) || '.png' } catch (e) { /* use png */ }
+        inputImage = await uploadImageToComfyui({ buffer: materialized, ext })
+      }
+      const overrides = inputImage
+        ? { seed, unet, i2iImage: inputImage, i2i: { mode: 'plain', denoise: seriesDenoise, caps: null } }
+        : { seed, unet }
+      const result = await runComfyGenerate(prompt, size, overrides)
+      return { ...result, prompt }
+    })
+
     // 队列：预排队全部阶段（先查容量再入队）
-    const queued = await enqueueBatch(count, (i) => runComfyGenerate(stagePrompts[i], size, { seed, unet }), { USERID, isAdmin, totalPrice: count * price })
+    const queued = await enqueueBatch(count, (i) => runSeriesStage(i), { USERID, isAdmin, totalPrice: count * price })
     if (!queued.ok) return queued.message
     const queuedTasks = queued.tasks
     const firstPosition = queued.firstPosition
@@ -1656,9 +1676,9 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.queueEnabled) {
         try { result = await queuedTasks[i] } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       } else {
-        try { result = await runComfyGenerate(stagePrompts[i], size, { seed, unet }) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
+        try { result = await runSeriesStage(i) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       }
-      result.prompt = stagePrompts[i]
+      if (!result.prompt) result.prompt = stagePrompts[i]
       return result
     }
 

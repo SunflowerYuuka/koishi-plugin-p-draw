@@ -12,6 +12,7 @@ const wf = require('../lib/workflows')
 const comfy = require('../lib/comfy')
 const multi = require('../lib/multi')
 const media = require('../lib/media')
+const series = require('../lib/series')
 
 // ---------------- parse.js ----------------
 
@@ -342,4 +343,19 @@ test('multiPersonAutoSize', () => {
   assert.deepStrictEqual(multi.multiPersonAutoSize('两个女孩', allowed), [1152, 896])
   assert.deepStrictEqual(multi.multiPersonAutoSize('34人', allowed), [1152, 896])
   assert.strictEqual(multi.multiPersonAutoSize('x', []), null)
+})
+
+test('createSeriesStageRunner passes each successful stage output to the next stage', async () => {
+  const calls = []
+  const runStage = series.createSeriesStageRunner(['stage-1', 'stage-2', 'stage-3'], async (input) => {
+    calls.push(input)
+    return { ok: true, outputs: [`image-${input.index}`] }
+  })
+  await runStage(0)
+  await runStage(1)
+  await runStage(2)
+  assert.strictEqual(calls[0].previousOutput, null)
+  assert.strictEqual(calls[1].previousOutput, 'image-0')
+  assert.strictEqual(calls[2].previousOutput, 'image-1')
+  assert.deepStrictEqual(calls.map(call => call.prompt), ['stage-1', 'stage-2', 'stage-3'])
 })
