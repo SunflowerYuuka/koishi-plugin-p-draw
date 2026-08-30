@@ -4,15 +4,12 @@ const assert = require('node:assert')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { pathToFileURL } = require('url')
 
 const parse = require('../lib/parse')
 const tags = require('../lib/tags')
 const wf = require('../lib/workflows')
 const comfy = require('../lib/comfy')
 const multi = require('../lib/multi')
-const media = require('../lib/media')
-const series = require('../lib/series')
 
 // ---------------- parse.js ----------------
 
@@ -61,12 +58,6 @@ test('parseSeed', () => {
   assert.strictEqual(parse.parseSeed('画 --seed:456').seed, 456)
   assert.strictEqual(parse.parseSeed('画一个女孩').seed, null)
   assert.ok(!parse.parseSeed('画 --seed 99').prompt.includes('--seed'))
-})
-
-test('parseDenoise', () => {
-  assert.strictEqual(parse.parseDenoise('i2i --denoise 0.6').denoise, 0.6)
-  assert.strictEqual(parse.parseDenoise('i2i --去噪 0.4').denoise, 0.4)
-  assert.strictEqual(parse.parseDenoise('i2i').denoise, null)
 })
 
 test('stripRawPrefix', () => {
@@ -176,7 +167,6 @@ test('mergeNegativePrompts keeps defaults and appends only new user tags', () =>
 function baseCfg(extra = {}) {
   return Object.assign({
     unetName: 'anima-base-v1.0.safetensors',
-    i2iUnetName: 'anima-base-v1.0.safetensors',
     clipName: 'qwen_3_06b_base.safetensors',
     vaeName: 'qwen_image_vae.safetensors',
     samplerName: 'er_sde',
@@ -184,12 +174,6 @@ function baseCfg(extra = {}) {
     customWorkflowEnabled: false,
     customWorkflowPath: '',
     customWorkflowOverrideParameters: false,
-    i2iStyleDenoise: 0.75,
-    i2iOotdDenoise: 0.55,
-    img2imgDenoise: 0.55,
-    i2iControlNetStrength: 0.7,
-    i2iIPAdapterPath: '',
-    i2iIPAdapterWeight: 0.8,
   }, extra)
 }
 
@@ -202,27 +186,6 @@ test('animaT2IWorkflow structure', () => {
   assert.strictEqual(w['11'].inputs.text, 'p')
   assert.strictEqual(w['12'].inputs.text, 'n')
   assert.strictEqual(w['28'].inputs.width, 832)
-})
-
-test('buildI2IWorkflow modes', () => {
-  const img = 'x.png'
-  // plain
-  const plain = wf.buildI2IWorkflow(baseCfg(), 'p', 'n', 512, 512, 30, 4.5, 1, img, 'plain', null, null)
-  assert.strictEqual(plain.kind, 'plain')
-  assert.strictEqual(plain.promptBody['13'].class_type, 'LoadImage')
-  // style with controlnet caps
-  const style = wf.buildI2IWorkflow(baseCfg(), 'p', 'n', 512, 512, 30, 4.5, 1, img, 'style', null, { controlNet: { available: true, model: 'anima-lllite-lineart.safetensors', preprocessor: 'Canny' }, ipAdapter: { available: false } })
-  assert.strictEqual(style.kind, 'controlnet')
-  assert.strictEqual(style.promptBody['71'].class_type, 'AnimaLLLiteApply_sdscripts')
-  assert.strictEqual(style.promptBody['44'].inputs.unet_name, 'anima-base-v1.0.safetensors')
-  // style without caps -> plain with low denoise
-  const styleFallback = wf.buildI2IWorkflow(baseCfg(), 'p', 'n', 512, 512, 30, 4.5, 1, img, 'style', null, { controlNet: { available: false }, ipAdapter: { available: false } })
-  assert.strictEqual(styleFallback.kind, 'plain')
-  assert.ok(styleFallback.denoise <= 0.5)
-  // ootd with ipadapter
-  const ootd = wf.buildI2IWorkflow(baseCfg({ i2iIPAdapterPath: '/models/ip.safetensors' }), 'p', 'n', 512, 512, 30, 4.5, 1, img, 'ootd', null, { controlNet: { available: false }, ipAdapter: { available: true } })
-  assert.strictEqual(ootd.kind, 'ipadapter')
-  assert.strictEqual(ootd.promptBody['82'].class_type, 'AnimaIPAdapterApply')
 })
 
 test('customWorkflow injects text and throws on missing nodes', () => {
@@ -254,21 +217,6 @@ test('outputImages', () => {
   const imgs = comfy.outputImages(history)
   assert.deepStrictEqual(imgs.map(i => i.filename).sort(), ['a.png', 'b.png', 'c.png'])
   assert.deepStrictEqual(comfy.outputImages({}), [])
-})
-
-test('materializeImageSource converts local file URLs to buffers', async () => {
-  const filePath = path.join(os.tmpdir(), 'pdraw.png')
-  const source = await media.materializeImageSource(pathToFileURL(filePath).href, async (resolvedPath) => {
-    assert.strictEqual(path.resolve(resolvedPath), path.resolve(filePath))
-    return Buffer.from('png-data')
-  })
-  assert.ok(Buffer.isBuffer(source))
-  assert.strictEqual(source.toString(), 'png-data')
-})
-
-test('materializeImageSource preserves non-file image sources', async () => {
-  const source = 'https://example.com/image.png'
-  assert.strictEqual(await media.materializeImageSource(source), source)
 })
 
 // ---------------- multi.js ----------------
@@ -343,19 +291,4 @@ test('multiPersonAutoSize', () => {
   assert.deepStrictEqual(multi.multiPersonAutoSize('两个女孩', allowed), [1152, 896])
   assert.deepStrictEqual(multi.multiPersonAutoSize('34人', allowed), [1152, 896])
   assert.strictEqual(multi.multiPersonAutoSize('x', []), null)
-})
-
-test('createSeriesStageRunner passes each successful stage output to the next stage', async () => {
-  const calls = []
-  const runStage = series.createSeriesStageRunner(['stage-1', 'stage-2', 'stage-3'], async (input) => {
-    calls.push(input)
-    return { ok: true, outputs: [`image-${input.index}`] }
-  })
-  await runStage(0)
-  await runStage(1)
-  await runStage(2)
-  assert.strictEqual(calls[0].previousOutput, null)
-  assert.strictEqual(calls[1].previousOutput, 'image-0')
-  assert.strictEqual(calls[2].previousOutput, 'image-1')
-  assert.deepStrictEqual(calls.map(call => call.prompt), ['stage-1', 'stage-2', 'stage-3'])
 })

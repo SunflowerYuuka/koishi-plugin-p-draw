@@ -43,7 +43,6 @@ const cfg = {
   timeout: 300,
   pollInterval: 2,
   unetName: 'anima-base-v1.0.safetensors',
-  i2iUnetName: 'anima-base-v1.0.safetensors',
   modelParams: {},
   clipName: 'qwen_3_06b_base.safetensors',
   vaeName: 'qwen_image_vae.safetensors',
@@ -80,20 +79,7 @@ const cfg = {
   multiPrice: 900,
   couponPrice: 3000,
   couponAskTimeout: 60,
-  img2imgDenoise: 0.55,
-  i2iMode: 'ask',
-  i2iAskTimeout: 60,
   seriesAskTimeout: 60,
-  i2iStyleDenoise: 0.75,
-  i2iOotdDenoise: 0.55,
-  i2iControlNetStrength: 0.7,
-  i2iIPAdapterPath: '',
-  i2iIPAdapterWeight: 0.8,
-  controlNetModel: '',
-  taggerEnabled: false,
-  taggerModel: 'wd-v1-4-convnext-tagger-v2',
-  taggerThreshold: 0.35,
-  taggerCharacterThreshold: 0.85,
   adminUsers: [],
   outputLogs: false,
   multiVerifyEnabled: false,
@@ -119,7 +105,8 @@ test('apply boots and returns test interface', async () => {
   assert.ok(iface)
   assert.strictEqual(typeof iface.normalizeConfirm, 'function')
   assert.strictEqual(typeof iface.resolveCouponPrice, 'function')
-  assert.strictEqual(typeof iface.animaI2IWorkflow, 'function')
+  assert.strictEqual(iface.handleGenerateI2I, undefined)
+  assert.strictEqual(iface.animaI2IWorkflow, undefined)
 })
 
 test('normalizeConfirm', () => {
@@ -131,21 +118,9 @@ test('normalizeConfirm', () => {
   assert.strictEqual(iface.normalizeConfirm(''), null)
 })
 
-test('parseDenoise via apply', () => {
-  const r = iface.parseDenoise('i2i --denoise 0.7')
-  assert.strictEqual(r.denoise, 0.7)
-})
-
 test('resolveCouponPrice falls back to cfg', async () => {
   const price = await iface.resolveCouponPrice()
   assert.strictEqual(price, cfg.couponPrice)
-})
-
-test('animaI2IWorkflow via apply', () => {
-  const w = iface.animaI2IWorkflow(cfg, 'p', 'n', 512, 512, 30, 4.5, 7, 'in.png', 0.5)
-  assert.strictEqual(w['13'].class_type, 'LoadImage')
-  assert.strictEqual(w['19'].inputs.denoise, 0.5)
-  assert.strictEqual(w['19'].inputs.seed, 7)
 })
 
 test('generated images and their prompts are sent as paired forward nodes', async () => {

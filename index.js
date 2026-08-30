@@ -3,7 +3,7 @@ const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
 const crypto = require('crypto')
-const { pathToFileURL, fileURLToPath } = require('url')
+const { pathToFileURL } = require('url')
 
 exports.name = 'p-draw'
 
@@ -28,12 +28,7 @@ exports.usage = `
 - **联网搜索：** 描述中带 \`联网\` / \`搜索\` / \`查一下\` 等词时，会先联网搜索补充角色设定（需配置 Tavily Key）。
 - **画师组：** \`创建画师组 名称=tags\` \`切换画师组 名称\` \`查看画师组\` \`删除画师组 名称\`
 - **固定角色：** \`添加角色 名称=tags\`
-- **以图生图：** \`p-draw i2i <描述>\`，并在同一条消息里附一张原图（文件/截图/链接均可）。发送后会询问处理模式：
-  - **① 换风格（漫画化）**：保留原图构图，把图片转成二次元画风（用 ControlNet 锁结构）
-  - **② 换装换姿势**：保留角色长相，重新设计服装/姿势/场景（用 IP-Adapter 保脸）
-  - **③ 取消**：不生成
-  - 可加 \`--denoise 0.6\` 单独调整强度；未装 ControlNet/IPAdapter 时自动回退普通 img2img。
-`;
+ `;
 
 const { zhCN } = require('./lib/i18n')
 exports.Config = Schema.object({
@@ -48,7 +43,6 @@ exports.Config = Schema.object({
 
   // 模型文件
   unetName: Schema.string().default('anima-base-v1.0.safetensors').description('主模型文件名（需与 ComfyUI models/diffusion_models 下的文件名完全一致，含连字符；默认 anima-base-v1.0.safetensors）'),
-  i2iUnetName: Schema.string().default('anima-base-v1.0.safetensors').description('「换风格（漫画化）」工作流专用主模型文件名。LLLite 权重按 block 数逐块训练，当前 LLLite 权重为 28-block，必须搭配 28-block 模型（anima-base-v1.0 / anima-aesthetic-v1.1）；不要用 40-block 的 Anima-2.9B，否则报 depth_embed slices missing。留空则用主模型 unetName'),
   modelParams: Schema.dict(Schema.object({
     samplerName: Schema.string().description('采样器（如 er_sde / res_2s / dpmpp_2m）'),
     scheduler: Schema.string().description('调度器（如 simple / beta57 / normal）'),
@@ -98,20 +92,7 @@ exports.Config = Schema.object({
   multiPrice: Schema.number().default(900).description('多人指令（p-draw 多人）单张消耗的 P 点'),
   couponPrice: Schema.number().default(3000).description('提示词优化券单价（P 点/张，购买询问时显示；可自动读取 data/p-shop.json 里的价格覆盖）'),
   couponAskTimeout: Schema.number().default(60).description('提示词优化券确认等待时间（秒）'),
-  img2imgDenoise: Schema.number().default(0.55).description('普通以图生图（p-draw i2i）的去噪强度，越小越接近原图（建议 0.4-0.7）'),
-  i2iMode: Schema.string().default('ask').description('i2i 模式选择方式：ask=每次询问 / style=直接换风格（漫画化）/ ootd=直接换装换姿势 / plain=普通 img2img'),
-  i2iAskTimeout: Schema.number().default(60).description('i2i 模式询问等待时间（秒）'),
   seriesAskTimeout: Schema.number().default(60).description('连续图 LLM 使用确认等待时间（秒）'),
-  i2iStyleDenoise: Schema.number().default(0.75).description('换风格模式（漫画化）的去噪强度，越大风格变化越彻底（建议 0.7-0.85）'),
-  i2iOotdDenoise: Schema.number().default(0.55).description('换装换姿势模式（保留角色）的去噪强度（建议 0.5-0.6）'),
-  i2iControlNetStrength: Schema.number().default(0.7).description('换风格模式的 ControlNet-LLLite 强度，越大构图锁得越死（建议 0.5-0.8；需安装 kohya-ss/ComfyUI-Anima-LLLite 节点与权重）'),
-  i2iIPAdapterPath: Schema.string().default('').description('Anima IP-Adapter 模型文件路径（换装换姿势模式保脸用；需安装 comfyui-anima-ipadapter 节点并把模型路径填到这里）'),
-  i2iIPAdapterWeight: Schema.number().default(0.8).description('换装换姿势模式的 IP-Adapter 权重，越大角色特征保留越强（建议 0.6-1.0）'),
-  controlNetModel: Schema.string().default('').description('Anima ControlNet-LLLite 权重文件名（留空自动检测 anima-lllite 系；需放到 ComfyUI/models/controlnet，如 anima-lllite-lineart-test-1.safetensors）'),
-  taggerEnabled: Schema.boolean().default(false).description('i2i 前自动识图（需 ComfyUI 安装 WD14 Tagger 节点与模型；识别出的标签会注入提示词优化）'),
-  taggerModel: Schema.string().default('wd-v1-4-convnext-tagger-v2').description('识图模型名（WD14 Tagger 节点里可选模型）'),
-  taggerThreshold: Schema.number().default(0.35).description('识图标签置信度阈值'),
-  taggerCharacterThreshold: Schema.number().default(0.85).description('识图角色标签置信度阈值'),
   adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID 列表'),
   outputLogs: Schema.boolean().default(true).description('是否在控制台输出详细日志'),
 
@@ -138,7 +119,7 @@ exports.Config = Schema.object({
 // 纯函数库已拆分到 lib/（解析 / tag 清洗 / 工作流 / Comfy 等待 / 多人规划 / HTTP 客户端）
 // ------------------------------------------------------------------
 const {
-  normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed, parseDenoise,
+  normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed,
   stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
 } = require('./lib/parse')
 const {
@@ -146,12 +127,10 @@ const {
   NO_ARTIST_RE, NO_STYLE_RE,
 } = require('./lib/tags')
 const {
-  animaT2IWorkflow, buildWorkflow, animaI2IWorkflow, animaStyleI2IWorkflow,
-  animaOotdI2IWorkflow, buildI2IWorkflow, customWorkflow,
+  buildWorkflow,
 } = require('./lib/workflows')
 const { outputImages, waitComfyResult } = require('./lib/comfy')
 const { materializeImageSource } = require('./lib/media')
-const { createSeriesStageRunner } = require('./lib/series')
 const {
   MULTI_PERSON_NEGATIVE_TAGS, buildMultiPersonPlanPrompt, parseMultiPersonPlan,
   renderMultiPersonCharacter, multiPersonAutoSize,
@@ -264,12 +243,10 @@ exports.apply = async function apply(ctx, cfg) {
       const vaeList = availableModels(objectInfo, 'VAELoader', 'vae_name')
       payload.unet_available = unetList.includes(cfg.unetName)
       payload.unet_models = unetList
-      payload.i2i_unet_available = unetList.includes(String(cfg.i2iUnetName || '').trim() || cfg.unetName)
       payload.clip_available = clipList.includes(cfg.clipName)
       payload.vae_available = vaeList.includes(cfg.vaeName)
     } else {
       payload.unet_available = undefined
-      payload.i2i_unet_available = undefined
       payload.clip_available = undefined
       payload.vae_available = undefined
     }
@@ -315,7 +292,6 @@ exports.apply = async function apply(ctx, cfg) {
       `版本：${payload.comfyui_version || '未知'}`,
       `GPU：${payload.gpu || '未知'}（显存 ${payload.vram_total_mb}MB / 空闲 ${payload.vram_free_mb}MB）`,
       `主模型：${cfg.unetName} ${modelStatus(cfg.unetName, payload.unet_available)}`,
-      `换风格模型：${cfg.i2iUnetName || cfg.unetName} ${modelStatus(cfg.i2iUnetName || cfg.unetName, payload.i2i_unet_available)}`,
       `文本编码器：${cfg.clipName} ${modelStatus(cfg.clipName, payload.clip_available)}`,
       `VAE：${cfg.vaeName} ${modelStatus(cfg.vaeName, payload.vae_available)}`,
       `可用尺寸：${payload.allowed_sizes.join('、')}`,
@@ -598,14 +574,7 @@ exports.apply = async function apply(ctx, cfg) {
     const cfgVal = Number(overrides.cfg) || workCfg.cfg
     const seed = Number(overrides.seed) || crypto.randomInt(1, 2 ** 32 - 1)
     const negativePrompt = joinPromptParts([overrides.negativePrompt || cfg.negativePrompt || ''])
-    const i2iImage = overrides.i2iImage
-    if (i2iImage && cfg.customWorkflowEnabled && cfg.customWorkflowPath) {
-      return { ok: false, message: 'i2i（以图生图）暂不支持自定义工作流（customWorkflowEnabled），请关闭后再试。' }
-    }
-    const i2iOpts = overrides.i2i || {}
-    const promptBody = i2iImage
-      ? buildI2IWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, i2iImage, i2iOpts.mode || 'plain', i2iOpts.denoise != null ? i2iOpts.denoise : null, i2iOpts.caps || null).promptBody
-      : buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size))
+    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size))
 
     const clientId = crypto.randomUUID()
     const submit = await comfyPost('/prompt', { prompt: promptBody, client_id: clientId }, 20000)
@@ -772,7 +741,7 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
-  async function optimizePrompt(session, userPrompt, force = false, img2imgRule = '', precomputedSearch = null) {
+  async function optimizePrompt(session, userPrompt, force = false, precomputedSearch = null) {
     if (!cfg.promptOptimizeEnabled && !force) {
       return { ok: true, prompt: userPrompt, reason: 'optimize_disabled' }
     }
@@ -788,7 +757,7 @@ exports.apply = async function apply(ctx, cfg) {
       searchBlock = await webSearch(userPrompt)
     }
     const characterRule = buildCharacterRule(userPrompt)
-    const defaultTemplate = `你是为图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 以最终图像协调、精致、有表现力和好看为优先。\n\n角色和动态上下文：\n{character_rule}\n{img2img_rule}\n{search_block}\n\n用户原始要求：\n{theme}`
+    const defaultTemplate = `你是为图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 以最终图像协调、精致、有表现力和好看为优先。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}`
     const template = (cfg.promptOptimizeTemplate || '').trim() || defaultTemplate
     const searchBlockText = searchBlock
       ? `联网搜索参考信息（请尽量依据这些内容补全角色外观与设定）：\n${searchBlock}`
@@ -797,10 +766,6 @@ exports.apply = async function apply(ctx, cfg) {
       .replace(/\{theme\}/g, userPrompt)
       .replace(/\{search_block\}/g, searchBlockText)
       .replace(/\{character_rule\}/g, characterRule)
-      .replace(/\{outfit_transfer_rule\}/g, '')
-      .replace(/\{reference_rule\}/g, '')
-      .replace(/\{img2img_rule\}/g, img2imgRule)
-      .replace(/\{sensual_rule\}/g, '')
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
@@ -1634,27 +1599,8 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 连续图已扣除 ${count * price} P 点（${count} 阶段 × ${price}，seed=${seed}），余额 ${saving - count * price}`)
     }
 
-    // 连续图阶段串联：首阶段 T2I，后续阶段把上一阶段图片上传回 ComfyUI 后走普通 i2i。
-    // img2imgDenoise 作为链式阶段的去噪强度配置，默认沿用普通 i2i 的 0.55。
-    const seriesDenoise = Number(cfg.img2imgDenoise) || 0.55
-    const runSeriesStage = createSeriesStageRunner(stagePrompts, async ({ prompt, previousOutput }) => {
-      let inputImage = null
-      if (previousOutput) {
-        const materialized = await materializeImageSource(previousOutput)
-        if (!Buffer.isBuffer(materialized)) throw new Error('无法读取上一阶段图片，连续图已停止')
-        let ext = '.png'
-        try { ext = path.extname(fileURLToPath(previousOutput)) || '.png' } catch (e) { /* use png */ }
-        inputImage = await uploadImageToComfyui({ buffer: materialized, ext })
-      }
-      const overrides = inputImage
-        ? { seed, unet, i2iImage: inputImage, i2i: { mode: 'plain', denoise: seriesDenoise, caps: null } }
-        : { seed, unet }
-      const result = await runComfyGenerate(prompt, size, overrides)
-      return { ...result, prompt }
-    })
-
     // 队列：预排队全部阶段（先查容量再入队）
-    const queued = await enqueueBatch(count, (i) => runSeriesStage(i), { USERID, isAdmin, totalPrice: count * price })
+    const queued = await enqueueBatch(count, (i) => runComfyGenerate(stagePrompts[i], size, { seed, unet }), { USERID, isAdmin, totalPrice: count * price })
     if (!queued.ok) return queued.message
     const queuedTasks = queued.tasks
     const firstPosition = queued.firstPosition
@@ -1676,9 +1622,8 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.queueEnabled) {
         try { result = await queuedTasks[i] } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       } else {
-        try { result = await runSeriesStage(i) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
+        try { result = await runComfyGenerate(stagePrompts[i], size, { seed, unet }) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       }
-      if (!result.prompt) result.prompt = stagePrompts[i]
       return result
     }
 
@@ -1874,12 +1819,6 @@ exports.apply = async function apply(ctx, cfg) {
         return await handleGenerateSeries(session, seriesMatch[1].trim())
       }
 
-      // 以图生图指令：p-draw i2i <描述>（需同一条消息附带原图）
-      const i2iMatch = text.match(/^i2i\s*(.*)$/i)
-      if (i2iMatch) {
-        return await handleGenerateI2I(session, i2iMatch[1].trim())
-      }
-
       // 多人指令：p-draw 多人 <描述>
       const multiMatch = text.match(/^(?:多人|多人生图|双人|三人|群像)\s*(.*)$/)
       if (multiMatch) {
@@ -2005,230 +1944,10 @@ exports.apply = async function apply(ctx, cfg) {
       return await handleGenerate(session, text)
     })
 
-  // ---------------- 以图生图（p-draw i2i） ----------------
-  async function handleGenerateI2I(session, rawText) {
-    if (cfg.customWorkflowEnabled && cfg.customWorkflowPath) {
-      return session.text('.i2i-no-custom-workflow')
-    }
-    const image = await extractImageFromSession(session)
-    if (!image) return session.text('.i2i-no-image')
-    let uploadName
-    try {
-      uploadName = await uploadImageToComfyui(image)
-    } catch (e) {
-      logger.warn(`上传原图失败：${e.message}`)
-      return session.text('.i2i-upload-fail', [e.message])
-    }
-    if (cfg.outputLogs) logger.info(`[p-draw] i2i ${session.userId} 原图已上传：${uploadName}`)
-
-    // 能力检测（ControlNet / Anima IP-Adapter）
-    const caps = await detectI2ICapabilities()
-
-    // 处理模式：i2iMode=ask 时交互询问；style/ootd/plain 直接固定
-    let mode = 'plain'
-    const cfgMode = String(cfg.i2iMode || 'ask').toLowerCase()
-    if (cfgMode === 'style' || cfgMode === 'ootd') {
-      mode = cfgMode
-    } else if (cfgMode === 'ask' && typeof session.prompt === 'function') {
-      const chosen = await askI2IMode(session)
-      if (chosen === 'cancel') return session.text('.i2i-mode-cancelled')
-      if (chosen === null) {
-        await session.send(session.text('.i2i-mode-cancelled'))
-        return ''
-      }
-      mode = chosen
-      if (mode === 'style') await session.send(session.text('.i2i-mode-style'))
-      if (mode === 'ootd') await session.send(session.text('.i2i-mode-ootd'))
-    }
-    if (cfg.outputLogs) logger.info(`[p-draw] i2i ${session.userId} 模式=${mode} ControlNet=${caps.controlNet.available ? caps.controlNet.model : '-'} IPAdapter=${caps.ipAdapter.available ? 'on' : 'off'}`)
-
-    // 所选模式依赖的节点缺失时给出提示（仍会回退普通 img2img，不中断）
-    const notices = []
-    if (mode === 'style' && (!caps.controlNet.available || !caps.controlNet.model)) {
-      notices.push(session.text('.i2i-no-controlnet'))
-    }
-    if (mode === 'ootd' && (!caps.ipAdapter.available || !String(cfg.i2iIPAdapterPath || '').trim())) {
-      notices.push(session.text('.i2i-no-ipadapter'))
-    }
-    if (notices.length) {
-      try { await session.send(notices.join('\n')) } catch (e) { logger.warn(`发送 i2i 提示失败：${e.message}`) }
-    }
-
-    // 识图：仅当启用、非无优化模式、且已配置 LLM（识图结果会注入提示词优化）时才执行
-    let taggerTags = ''
-    if (cfg.taggerEnabled && cfg.llmModel && cfg.llmBaseUrl && !stripRawPrefix(rawText).raw) {
-      try {
-        taggerTags = await taggerImage(uploadName)
-        if (cfg.outputLogs) logger.info(`[p-draw] i2i ${session.userId} 识图完成：${taggerTags.slice(0, 120)}${taggerTags.length > 120 ? '...' : ''}`)
-      } catch (e) {
-        logger.warn(`识图失败（继续生图）：${e.message}`)
-      }
-    }
-    return await handleGenerate(session, rawText, uploadName, taggerTags, { mode, caps })
-  }
-
-  // 识图预工作流：LoadImage → WD14Tagger|pysssss，读回原图 tags
-  async function taggerImage(uploadName) {
-    const model = String(cfg.taggerModel || 'wd-v1-4-convnext-tagger-v2').trim()
-    const taggerNodeId = '61'
-    const promptBody = {
-      '60': { class_type: 'LoadImage', inputs: { image: uploadName } },
-      [taggerNodeId]: {
-        class_type: 'WD14Tagger|pysssss',
-        inputs: {
-          image: ['60', 0],
-          model,
-          threshold: Number(cfg.taggerThreshold) || 0.35,
-          character_threshold: Number(cfg.taggerCharacterThreshold) || 0.85,
-          replace_underscore: true,
-          trailing_comma: false,
-          exclude_tags: '',
-        },
-      },
-    }
-    const clientId = crypto.randomUUID()
-    const submit = await comfyPost('/prompt', { prompt: promptBody, client_id: clientId }, 20000)
-    const promptId = submit && submit.prompt_id
-    if (!promptId) throw new Error('识图工作流提交失败')
-    const timeoutMs = Math.max(1, parseInt(cfg.timeout) || 300) * 1000
-    const pollMs = Math.max(1, parseInt(cfg.pollInterval) || 2) * 1000
-    const history = await waitComfyResult(ctx, comfyGet, baseUrl(), promptId, clientId, timeoutMs, pollMs)
-    if (!history) throw new Error('识图超时')
-    const nodeOutput = history.outputs && history.outputs[taggerNodeId]
-    const tags = (nodeOutput && Array.isArray(nodeOutput.tags) ? nodeOutput.tags : []).filter(Boolean)
-    const first = String(tags[0] || '').trim()
-    if (!first) throw new Error('识图未返回标签')
-    return first
-  }
-
-  // 从会话消息里取第一张图片并下载为内存 Buffer
-  async function extractImageFromSession(session) {
-    const elements = session.elements || []
-    const img = elements.find((e) => e.type === 'img' || e.type === 'image')
-    if (!img) return null
-    const attrs = img.attrs || img.data || {}
-    const src = String(attrs.src || '')
-    if (!src) return null
-    try {
-      if (/^file:\/\//i.test(src)) {
-        // 修复：Windows 下 file:///K:/... 用 replace 会得到 /K:/...（无法读取），用 fileURLToPath 解析
-        let filePath
-        try {
-          filePath = fileURLToPath(src)
-        } catch (e) {
-          filePath = src.replace(/^file:\/\//i, '')
-        }
-        const buffer = await fsp.readFile(filePath)
-        return { buffer, ext: path.extname(filePath) || '.png' }
-      }
-      if (/^data:/i.test(src)) {
-        const m = src.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/)
-        if (!m) return null
-        const kind = m[1].toLowerCase()
-        const ext = kind === 'jpeg' ? '.jpg' : kind === 'webp' ? '.webp' : kind === 'png' ? '.png' : '.' + (kind || 'png')
-        return { buffer: Buffer.from(m[2], 'base64'), ext }
-      }
-      const res = await fetch(src)
-      if (!res.ok) return null
-      const buffer = Buffer.from(await res.arrayBuffer())
-      const mime = String(res.headers.get('content-type') || '')
-      const ext = mime.includes('jpeg') ? '.jpg' : mime.includes('webp') ? '.webp' : '.png'
-      return { buffer, ext }
-    } catch (e) {
-      logger.warn(`读取原图失败：${e.message}`)
-      return null
-    }
-  }
-
-  // 上传图片到 ComfyUI input 目录，返回 ComfyUI 使用的文件名
-  async function uploadImageToComfyui(image) {
-    const filename = `pdraw_i2i_${Date.now()}_${crypto.randomBytes(4).toString('hex')}${image.ext || '.png'}`
-    const form = new FormData()
-    form.append('image', new Blob([image.buffer]), filename)
-    form.append('overwrite', 'true')
-    form.append('type', 'input')
-    const res = await fetch(baseUrl() + '/upload/image', { method: 'POST', body: form })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json().catch(() => ({}))
-    if (!data || !data.name) throw new Error('ComfyUI 未返回上传文件名')
-    return data.name
-  }
-
-  // 检测 i2i 可用能力：Anima ControlNet-LLLite 节点与权重（comfyui-anima-lllite / kohya-ss/ComfyUI-Anima-LLLite）、
-  // LineArt 预处理器（comfyui_controlnet_aux，可选）与 Anima IP-Adapter 专用节点（comfyui-anima-ipadapter）。
-  // 检测失败全部视为不可用（回退普通 img2img）。
-  // 注意：Qwen-Image InstantX ControlNet 与 Anima（MiniTrainDIT，3584 维）架构不兼容，这里只认 LLLite 权重。
-  async function detectI2ICapabilities() {
-    const caps = { controlNet: { available: false, model: null, preprocessor: 'Canny' }, ipAdapter: { available: false } }
-    let info
-    try {
-      info = await getObjectInfoCached()
-    } catch (e) {
-      return caps
-    }
-    if (!info || typeof info !== 'object') return caps
-    // LineArt 预处理器（comfyui_controlnet_aux）：AnimeLineArt 更贴近漫画线条，优先；LineArt 次之；都没有则回退 Canny
-    if (info.AnimeLineArtPreprocessor) {
-      caps.controlNet.preprocessor = 'AnimeLineArtPreprocessor'
-    } else if (info.LineArtPreprocessor) {
-      caps.controlNet.preprocessor = 'LineArtPreprocessor'
-    }
-    // Anima ControlNet-LLLite：lllite_name 从 models/controlnet 目录读取，只挑 anima-lllite 系权重
-    if (info.AnimaLLLiteApply_sdscripts) {
-      const llliteModels = availableModels(info, 'AnimaLLLiteApply_sdscripts', 'lllite_name')
-      if (cfg.outputLogs) logger.info(`[p-draw] i2i LLLite 节点存在，models/controlnet 文件列表=${JSON.stringify(llliteModels)}`)
-      if (llliteModels.length) {
-        const configured = String(cfg.controlNetModel || '').trim()
-        const norm = (s) => String(s).toLowerCase().replace(/[-_ ]/g, '')
-        const prefers = ['anima-lllite-lineart', 'anima-lllite', 'lllite-lineart', 'lllite']
-        const pool = llliteModels.filter((m) => /lllite/i.test(String(m)))
-        const scored = pool.map((m) => ({ m, s: prefers.reduce((acc, p, i) => acc + (norm(m) === norm(p) ? prefers.length - i : 0), 0) }))
-        scored.sort((a, b) => b.s - a.s)
-        const best = (scored[0] && scored[0].m) || null
-        caps.controlNet.model = configured && llliteModels.includes(configured) ? configured : best
-        caps.controlNet.available = !!caps.controlNet.model
-      }
-      // 换风格专用主模型必须是 28-block（与 LLLite 权重匹配），检测它是否已安装
-      const styleModel = String(cfg.i2iUnetName || '').trim() || cfg.unetName
-      const unetList = availableModels(info, 'UNETLoader', 'unet_name')
-      if (unetList.length && !unetList.includes(styleModel)) {
-        logger.warn(`[p-draw] i2i 换风格专用主模型 ${styleModel} 不在 models/diffusion_models 中（现有：${JSON.stringify(unetList)}）。LLLite 权重为 28-block，请安装 anima-base-v1.0 或修改 i2iUnetName 配置，否则换风格会报 depth_embed slices missing`)
-        caps.controlNet.modelMismatch = true
-      }
-    } else if (cfg.outputLogs) {
-      logger.info('[p-draw] i2i 未检测到 AnimaLLLiteApply_sdscripts 节点（请确认已安装 kohya-ss/ComfyUI-Anima-LLLite 并重启 ComfyUI）')
-    }
-    if (info.AnimaIPAdapterLoader && info.AnimaIPAdapterApply && info.AnimaSiglipeEncodeImage) {
-      caps.ipAdapter.available = true
-    }
-    if (cfg.outputLogs) logger.info(`[p-draw] i2i 能力检测：ControlNet(LLLite)=${JSON.stringify(caps.controlNet)} IPAdapter=${JSON.stringify(caps.ipAdapter)}`)
-    return caps
-  }
-
-  // 交互式询问 i2i 处理模式，返回 'style' / 'ootd' / 'cancel' / null（超时或无法询问时 null）
-  async function askI2IMode(session, i18nAsk) {
-    if (typeof session.prompt !== 'function') return null
-    await session.send(i18nAsk || session.text('.i2i-mode-ask'))
-    const reply = await session.prompt((cfg.i2iAskTimeout || 60) * 1000).catch(() => null)
-    const ans = String((reply && (reply.content != null ? reply.content : reply)) || '').trim()
-    if (/^(1|①|换风格|风格|漫画|漫画化|style|stylechange)$/i.test(ans)) return 'style'
-    if (/^(2|②|换装|换装换姿势|换衣服|换姿势|ootd|outfit)$/i.test(ans)) return 'ootd'
-    if (/^(3|③|取消|不生成|不要|算了|cancel|no)$/i.test(ans)) return 'cancel'
-    if (!ans) return null
-    await session.send(session.text('.i2i-mode-invalid'))
-    return askI2IMode(session, i18nAsk)
-  }
-
-  async function handleGenerate(session, rawText, i2iImage = null, taggerTags = '', i2iOpts = null) {
+  async function handleGenerate(session, rawText) {
     const USERID = session.userId
     const isAdmin = isAdminUser(session)
     const unet = await resolveUnet(USERID)
-    const i2iRule = i2iImage
-      ? '这是以图生图（img2img）：原图的构图、主体与色调会被保留。请主要描述你希望发生的变化（风格、服装、表情、场景改造、细节调整等），不要重复描述原图已有的细节。'
-        + (taggerTags
-          ? `\n\n原图内容参考（本地识图自动识别出的标签，用于了解原图已包含的内容；不要照抄全部标签，只参考与用户改动需求相关的部分）：\n${taggerTags}`
-          : '')
-      : ''
     if (cfg.outputLogs) {
       logger.info(`[p-draw] 请求 userId=${USERID} isAdmin=${isAdmin} adminUsers=${JSON.stringify(cfg.adminUsers || [])} normalizeId=${normalizeId(USERID)}`)
     }
@@ -2242,11 +1961,8 @@ exports.apply = async function apply(ctx, cfg) {
     const parsedBatch = parseBatchCount(parsedSize.prompt, cfg.batchMax)
     // 固定种子解析（--seed:xxx / --seed xxx / --seed=xxx），并从提示词中剥离
     const parsedSeed = parseSeed(parsedBatch.prompt)
-    // i2i 去噪强度解析（--denoise 0.6 / --去噪 0.4），并从提示词中剥离
-    const parsedDenoise = i2iImage ? parseDenoise(parsedSeed.prompt) : { denoise: null, prompt: parsedSeed.prompt }
-    const text = parsedDenoise.prompt
+    const text = parsedSeed.prompt
     const seed = parsedSeed.seed
-    const denoise = parsedDenoise.denoise
     const count = parsedBatch.count
 
     // P 点校验（按总价 = 张数 × 单价）
@@ -2281,13 +1997,13 @@ exports.apply = async function apply(ctx, cfg) {
       const tokenOpt = !globalOpt && !isAdmin && cfg.llmModel && cfg.llmBaseUrl
       if (globalOpt) {
         // 全局优化开启：一次优化，整批复用同一提示词
-        const optimized = await optimizePrompt(session, userPrompt, false, i2iRule)
+        const optimized = await optimizePrompt(session, userPrompt, false)
         finalPrompt = optimized.prompt
         degraded = !optimized.ok
         optimizedReason = optimized.reason || ''
       } else if (adminOpt) {
         // 管理员在全局关闭时也免费优化（不耗券）
-        const optimized = await optimizePrompt(session, userPrompt, true, i2iRule)
+        const optimized = await optimizePrompt(session, userPrompt, true)
         finalPrompt = optimized.prompt
         degraded = !optimized.ok
         optimizedReason = optimized.reason || ''
@@ -2339,14 +2055,9 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 已扣除 ${count * cfg.price} P 点（${count} 张 × ${cfg.price}），余额 ${saving - count * cfg.price}`)
     }
 
-    // i2i 运行参数：模式（style/ootd/plain）、--denoise 覆盖值、检测到的能力
-    const i2iRun = i2iImage
-      ? { i2iImage, i2i: { mode: (i2iOpts && i2iOpts.mode) || 'plain', denoise: denoise != null ? denoise : null, caps: (i2iOpts && i2iOpts.caps) || null } }
-      : {}
     // 用户手写了 negative: 区块时，默认负面词仍保留；用户 tag 只补充未出现的部分。
     const generationOverrides = Object.assign(
       { unet, seed },
-      i2iRun,
       userNegativePrompt ? { negativePrompt: mergeNegativePrompts(cfg.negativePrompt, userNegativePrompt) } : {},
     )
 
@@ -2357,7 +2068,7 @@ exports.apply = async function apply(ctx, cfg) {
     const queued = await enqueueBatch(count, async (i) => {
       let p = finalPrompt
       if (perImageOptimize) {
-        const optimized = await optimizePrompt(session, userPrompt, true, i2iRule, searchCache)
+        const optimized = await optimizePrompt(session, userPrompt, true, searchCache)
         p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
       const generated = await runComfyGenerate(p, parsedSize.size, generationOverrides)
@@ -2393,7 +2104,7 @@ exports.apply = async function apply(ctx, cfg) {
     const runOne = async (i) => {
       let p = finalPrompt
       if (perImageOptimize) {
-        const optimized = await optimizePrompt(session, userPrompt, true, i2iRule, searchCache)
+        const optimized = await optimizePrompt(session, userPrompt, true, searchCache)
         p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
       }
       let result
@@ -2584,5 +2295,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, handleGenerateI2I, extractImageFromSession, uploadImageToComfyui, taggerImage, animaI2IWorkflow, animaStyleI2IWorkflow, animaOotdI2IWorkflow, buildI2IWorkflow, detectI2ICapabilities, parseDenoise, sendNotices, sendImagesAsForward, executeBatch }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, sendNotices, sendImagesAsForward, executeBatch }
 }
