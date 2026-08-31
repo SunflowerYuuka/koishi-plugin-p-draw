@@ -188,6 +188,55 @@ test('animaT2IWorkflow structure', () => {
   assert.strictEqual(w['28'].inputs.width, 832)
 })
 
+test('animagineT2IWorkflow builds a checkpoint SDXL graph', () => {
+  const w = wf.animagineT2IWorkflow(baseCfg({ unetName: 'animagine-xl-3.1.safetensors', samplerName: 'dpmpp_2m', scheduler: 'karras' }), '1girl', 'bad anatomy', 1024, 1536, 28, 7, 123)
+  const checkpoint = Object.entries(w).find(([, node]) => node.class_type === 'CheckpointLoaderSimple')
+  const latent = Object.entries(w).find(([, node]) => node.class_type === 'EmptyLatentImage')
+  const sampler = Object.entries(w).find(([, node]) => node.class_type === 'KSampler')
+  const decoded = Object.entries(w).find(([, node]) => node.class_type === 'VAEDecode')
+  const saved = Object.entries(w).find(([, node]) => node.class_type === 'SaveImage')
+
+  assert.ok(checkpoint)
+  assert.strictEqual(checkpoint[1].inputs.ckpt_name, 'animagine-xl-3.1.safetensors')
+  assert.strictEqual(latent[1].inputs.width, 1024)
+  assert.strictEqual(latent[1].inputs.height, 1536)
+  assert.deepStrictEqual(sampler[1].inputs.latent_image, [latent[0], 0])
+  assert.strictEqual(sampler[1].inputs.steps, 28)
+  assert.strictEqual(sampler[1].inputs.cfg, 7)
+  assert.strictEqual(sampler[1].inputs.sampler_name, 'dpmpp_2m')
+  assert.strictEqual(sampler[1].inputs.scheduler, 'karras')
+  assert.strictEqual(sampler[1].inputs.seed, 123)
+  assert.deepStrictEqual(decoded[1].inputs.samples, [sampler[0], 0])
+  assert.strictEqual(saved[1].inputs.filename_prefix, 'pdraw/animagine')
+})
+
+test('buildWorkflow routes normalized Animagine names while retaining Anima routing', () => {
+  const animagine = wf.buildWorkflow(baseCfg({ unetName: 'ANIMAGINE_XL_3.1.SAFETENSORS' }), 'p', 'n', 832, 1216, 30, 4.5, 123, false)
+  const anima = wf.buildWorkflow(baseCfg(), 'p', 'n', 832, 1216, 30, 4.5, 123, false)
+
+  assert.ok(Object.values(animagine).some(node => node.class_type === 'CheckpointLoaderSimple'))
+  assert.strictEqual(anima['44'].class_type, 'UNETLoader')
+})
+
+test('buildWorkflow keeps custom workflow precedence over Animagine routing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-wf-'))
+  const file = path.join(dir, 'wf.json')
+  fs.writeFileSync(file, JSON.stringify({
+    '1': { class_type: 'KSampler', inputs: { positive: ['10', 0], negative: ['11', 0], seed: 0 } },
+    '10': { class_type: 'CLIPTextEncode', inputs: { text: 'old', clip: ['2', 0] } },
+    '11': { class_type: 'CLIPTextEncode', inputs: { text: 'old negative', clip: ['2', 0] } },
+  }))
+
+  const w = wf.buildWorkflow(baseCfg({
+    unetName: 'animagine-xl-3.1.safetensors',
+    customWorkflowEnabled: true,
+    customWorkflowPath: file,
+  }), 'p', 'n', 832, 1216, 30, 4.5, 123, false)
+
+  assert.strictEqual(w['1'].class_type, 'KSampler')
+  assert.strictEqual(w['10'].inputs.text, 'p')
+})
+
 test('customWorkflow injects text and throws on missing nodes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-wf-'))
   const json = {

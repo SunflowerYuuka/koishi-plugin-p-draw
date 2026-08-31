@@ -81,6 +81,7 @@ exports.Config = Schema.object({
   activeArtistPreset: Schema.string().default('').description('启用的画师组名称'),
   defaultArtistTags: Schema.string().default('').description('备用画师 tags'),
   styleTags: Schema.string().default('').description('画风 tags'),
+  fixedCharacters: Schema.array(Schema.string()).default([]).description('固定角色（格式：角色名=tags；仅用于兼容旧配置，运行时数据保存在数据库）'),
 
   // 队列
   queueEnabled: Schema.boolean().default(true).description('启用生成队列（逐张顺序执行）'),
@@ -92,7 +93,6 @@ exports.Config = Schema.object({
   multiPrice: Schema.number().default(900).description('多人指令（p-draw 多人）单张消耗的 P 点'),
   couponPrice: Schema.number().default(3000).description('提示词优化券单价（P 点/张，购买询问时显示；可自动读取 data/p-shop.json 里的价格覆盖）'),
   couponAskTimeout: Schema.number().default(60).description('提示词优化券确认等待时间（秒）'),
-  seriesAskTimeout: Schema.number().default(60).description('连续图 LLM 使用确认等待时间（秒）'),
   adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID 列表'),
   outputLogs: Schema.boolean().default(true).description('是否在控制台输出详细日志'),
 
@@ -123,7 +123,7 @@ const {
   stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
 } = require('./lib/parse')
 const {
-  splitTags, canonicalTagText, joinPromptParts, mergeNegativePrompts, cleanContentTags, appendInlineProtectedTags,
+  splitTags, joinPromptParts, mergeNegativePrompts, cleanContentTags, appendInlineProtectedTags,
   NO_ARTIST_RE, NO_STYLE_RE,
 } = require('./lib/tags')
 const {
@@ -143,13 +143,14 @@ exports.apply = async function apply(ctx, cfg) {
   const logger = ctx.logger('p-draw')
   ctx.i18n.define('zh-CN', zhCN)
 
-  // 运行时数据（画师组/固定角色）持久化到 p_draw_config 表，而不是调用 scope.update
+  // 运行时数据持久化到数据库，而不是调用 scope.update
   // 写 koishi.yml：scope.update 会触发插件重载，导致正在生成的图被 dispose（Context has
-  // been disposed），且连续多次写入时配置文件会被冲掉（曾出现配置整体恢复成默认）。
+  // been disposed），且重复写入时配置文件会被冲掉（曾出现配置整体恢复成默认）。
   try {
     ctx.model.extend('p_draw_config', {
       id: 'unsigned',
       fixed_characters: 'json',
+      fixed_characters_migrated: 'boolean',
       artist_presets: 'json',
       active_artist_preset: 'text',
       default_artist_tags: 'text',
@@ -157,6 +158,16 @@ exports.apply = async function apply(ctx, cfg) {
     }, { autoInc: true })
   } catch (e) {
     logger.warn(`p_draw_config 表初始化失败：${e.message}`)
+  }
+
+  try {
+    ctx.model.extend('p_draw_fixed_characters', {
+      id: 'unsigned',
+      name: 'string',
+      tags: 'text',
+    }, { autoInc: true, unique: ['name'] })
+  } catch (e) {
+    logger.warn(`p_draw_fixed_characters 表初始化失败：${e.message}`)
   }
 
   // 用户自选模型偏好（userid -> unet 文件名），持久化在 p_draw_config.user_models
@@ -403,7 +414,7 @@ exports.apply = async function apply(ctx, cfg) {
     return String(cfg.styleTags).trim()
   }
 
-  // P 点余额预检（单图/多人/连续共用）
+  // P 点余额预检（单图/多人共用）
   async function precheckPoints(session, USERID, isAdmin, totalPrice) {
     if (isAdmin) return { ok: true }
     const notExists = await isAccountExists(USERID)
@@ -438,8 +449,8 @@ exports.apply = async function apply(ctx, cfg) {
     return { ok: true, tasks, firstPosition }
   }
 
-  // 即时反馈的公共部分。扣费提醒单独返回，随后以引用消息发送。
-  function feedbackBase(session, { firstPosition, count, totalPrice, isAdmin }) {
+  // 即时反馈的公共部分。扣费提醒在生成完成后使用实际 seed 发送。
+  function feedbackBase(session, { firstPosition, count }) {
     const notices = []
     if (cfg.queueEnabled) {
       notices.push(session.text('.queued', [firstPosition, cfg.queueMaxRequests || '∞']))
@@ -448,10 +459,12 @@ exports.apply = async function apply(ctx, cfg) {
       notices.push(session.text('.generating'))
       if (count > 1) notices.push(session.text('.batch-count', [count]))
     }
-    return {
-      notices,
-      chargeNotice: isAdmin ? '' : session.text('.charged', [totalPrice]),
-    }
+    return { notices }
+  }
+
+  function buildChargeNotice({ isAdmin, totalPrice, unetName, seeds }) {
+    if (isAdmin || !seeds.length) return ''
+    return `已扣除 ${totalPrice} P 点，当前模型：${unetName}，--seed=${seeds.join(',')}`
   }
 
   async function sendNotices(session, notices, opts = {}) {
@@ -499,17 +512,22 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   // ---------------- 用户自选模型 ----------------
-  // 从 ComfyUI /object_info（10 分钟缓存）读取真实的 UNET 模型列表
+  // 从 ComfyUI /object_info（10 分钟缓存）读取 UNET 和 checkpoint 模型列表
   async function listUnetModels() {
     try {
       const objectInfo = await getObjectInfoCached()
-      const list = availableModels(objectInfo, 'UNETLoader', 'unet_name')
-      if (list.length) return list
+      const list = [
+        ...availableModels(objectInfo, 'UNETLoader', 'unet_name'),
+        ...availableModels(objectInfo, 'CheckpointLoaderSimple', 'ckpt_name')
+          .filter(name => String(name).trim().toLowerCase().replace(/[-_]/g, '~') === 'animagine~xl~3.1.safetensors'),
+      ]
+      const unique = [...new Set(list)]
+      if (unique.length) return unique
     } catch (e) { /* ignore */ }
     return []
   }
 
-  // 解析该用户当前生效的 UNET 模型：有偏好且仍存在于 ComfyUI 时用偏好，否则回落默认
+  // 解析该用户当前生效的模型：有偏好且仍存在于 ComfyUI 时用偏好，否则回落默认
   async function resolveUnet(USERID) {
     const chosen = cfg.userModels && cfg.userModels[USERID]
     if (!chosen || !String(chosen).trim()) return cfg.unetName
@@ -559,12 +577,12 @@ exports.apply = async function apply(ctx, cfg) {
 
   async function runComfyGenerate(prompt, size, overrides) {
     const sizes = parseAllowedSizes()
-    const requestedWidth = (size && size[0]) || overrides.width || cfg.width
-    const requestedHeight = (size && size[1]) || overrides.height || cfg.height
     const unetName = overrides.unet || cfg.unetName
     // 应用该模型的独立参数覆盖（modelParams），再叠加命令级 overrides（overrides.steps/cfg 优先于模型级）
     const modelSpecific = resolveModelParams(unetName)
     const workCfg = Object.assign({}, cfg, modelSpecific, { unetName })
+    const requestedWidth = (size && size[0]) || overrides.width || workCfg.width
+    const requestedHeight = (size && size[1]) || overrides.height || workCfg.height
     // 防御：sampler/scheduler 配置若带尾随空格会导致 ComfyUI 报 "Value not in list"，统一 trim
     if (typeof workCfg.samplerName === 'string') workCfg.samplerName = workCfg.samplerName.trim()
     if (typeof workCfg.scheduler === 'string') workCfg.scheduler = workCfg.scheduler.trim()
@@ -679,9 +697,14 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   // 把命中的固定角色 tags 渲染进优化模板的 {character_rule} 占位符。
-  function buildCharacterRule(prompt) {
+  async function fixedCharacterRows(query = {}) {
+    const rows = await ctx.database.get('p_draw_fixed_characters', query)
+    return rows.sort((a, b) => Number(a.id) - Number(b.id))
+  }
+
+  async function buildCharacterRule(prompt) {
     const text = String(prompt || '')
-    for (const [name, tags] of Object.entries(parsePresetList(cfg.fixedCharacters))) {
+    for (const { name, tags } of await fixedCharacterRows()) {
       if (name && text.includes(name)) {
         return `用户提到了固定角色「${name}」，其外观 tags 为：${tags} 请优先保留这些特征。`
       }
@@ -756,7 +779,7 @@ exports.apply = async function apply(ctx, cfg) {
     } else if (wantsWebSearch(userPrompt)) {
       searchBlock = await webSearch(userPrompt)
     }
-    const characterRule = buildCharacterRule(userPrompt)
+    const characterRule = await buildCharacterRule(userPrompt)
     const defaultTemplate = `你是为图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 以最终图像协调、精致、有表现力和好看为优先。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}`
     const template = (cfg.promptOptimizeTemplate || '').trim() || defaultTemplate
     const searchBlockText = searchBlock
@@ -815,54 +838,9 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
-  function extractSeriesOptimizeJson(text) {
-    let raw = String(text || '').trim()
-    if (raw.startsWith('```')) raw = (raw.match(/```(?:json)?([\s\S]*?)```/) || [null, raw])[1].trim()
-    const start = raw.indexOf('{')
-    const end = raw.lastIndexOf('}')
-    if (start === -1 || end === -1 || end <= start) return null
-    try { return JSON.parse(raw.slice(start, end + 1)) } catch (e) { return null }
-  }
-
-  function filterFixedTags(tags, drops) {
-    if (!tags) return ''
-    const dropKeys = (drops || []).map(d => canonicalTagText(String(d))).filter(Boolean)
-    if (!dropKeys.length) return tags
-    return splitTags(tags)
-      .filter(t => !dropKeys.some(k => k && canonicalTagText(t).includes(k)))
-      .join(', ')
-  }
-
-  // 连续图专用的阶段优化：LLM 把「角色 + 阶段描述」转成 Danbooru tags，并返回
-  // 要从固定角色 tags 中移除的冲突项（如固定 silver hair、阶段变成 black hair）。
-  async function optimizeSeriesStage(userPrompt, identity) {
-    if (!cfg.llmModel || !cfg.llmBaseUrl) {
-      return { ok: false, prompt: userPrompt, drops: [], reason: 'llm_not_configured' }
-    }
-    const fixedTags = identity && parsePresetList(cfg.fixedCharacters)[identity]
-      ? parsePresetList(cfg.fixedCharacters)[identity]
-      : ''
-    const template = `你是为图像生成模型编写正面提示词的 AI 画师。这是「同一个角色」的连续变化过程中的某一个阶段。\n\n用户给出一行描述：<角色身份>，<本阶段的外貌/状态描述>。\n\n固定角色 tags（身份锚点，包含角色名标签、种族、体型、标志特征，也可能包含发色、瞳色等默认外观）：\n${fixedTags || '（无）'}\n\n输出要求：\n- 只输出一个 JSON 对象，不要 Markdown、不要解释、不要其他任何文字：\n{\n  "stage_tags": "一行英文 Danbooru-style tags，用于本阶段画面，英文逗号分隔；不含 masterpiece/best quality 等质量前缀，不含画师 tags",\n  "drop_fixed": ["要从固定 tags 中移除的标签列表；仅当本阶段描述明确改变了该外观时才列出"]\n}\n- 身份一致性：若用户描述的就是固定角色，stage_tags 必须包含该角色的角色名标签（如 kokkoro_(princess_connect!)），并保留种族、体型、标志特征等「不变的底层身份」。\n- 覆盖规则：本阶段描述明确提到的变化（发色、瞳色、表情、眼神、气质、种族变化等）必须体现在 stage_tags 中，并在 drop_fixed 中列出被替换掉的固定标签（措辞与固定 tags 一致或接近）。\n- 本阶段描述与固定 tags 无冲突时，drop_fixed 为 []。\n\n本阶段描述：\n{theme}`
-    const rendered = template.replace(/\{theme\}/g, userPrompt)
-    try {
-      const text = await llmChat({ system: rendered, user: userPrompt, maxTokens: Math.min(parseInt(cfg.llmMaxTokens) || 700, 900) })
-      const data = extractSeriesOptimizeJson(text)
-      if (data && String(data.stage_tags || '').trim()) {
-        const drops = Array.isArray(data.drop_fixed) ? data.drop_fixed.map(String).filter(Boolean) : []
-        return { ok: true, prompt: String(data.stage_tags).trim(), drops, reason: '' }
-      }
-      // JSON 解析失败：把整段文本当作阶段 tags，不剔除固定标签
-      return { ok: true, prompt: text, drops: [], reason: '' }
-    } catch (e) {
-      const reason = String(e && e.message || e)
-      logger.warn(`连续图阶段优化失败：${reason}`)
-      return { ok: false, prompt: userPrompt, drops: [], reason }
-    }
-  }
-
   // ---------------- 提示词组装 ----------------
   // fixedOverride：undefined=按名称自动匹配固定角色；'skip'=不注入固定角色；字符串=直接使用该字符串作为固定角色 tags
-  function composePrompt(userPrompt, raw, fixedOverride) {
+  async function composePrompt(userPrompt, raw, fixedOverride) {
     if (raw) return { prompt: userPrompt, degraded: false }
     const parts = []
     if (cfg.qualityPrefix) parts.push(String(cfg.qualityPrefix).trim())
@@ -871,7 +849,7 @@ exports.apply = async function apply(ctx, cfg) {
     } else if (typeof fixedOverride === 'string') {
       if (String(fixedOverride).trim()) parts.push(String(fixedOverride).trim())
     } else {
-      for (const [name, tags] of Object.entries(parsePresetList(cfg.fixedCharacters))) {
+      for (const { name, tags } of await fixedCharacterRows()) {
         if (name && userPrompt.includes(name)) {
           parts.push(tags)
           break
@@ -931,7 +909,7 @@ exports.apply = async function apply(ctx, cfg) {
   // 多人规划：让 LLM 输出结构化场景 JSON（2-4 人）。
   async function generateMultiPersonPlan(prompt) {
     const mentioned = {}
-    for (const [name, tags] of Object.entries(parsePresetList(cfg.fixedCharacters))) {
+    for (const { name, tags } of await fixedCharacterRows()) {
       if (name && prompt.includes(name)) mentioned[name] = tags
     }
     const planPrompt = buildMultiPersonPlanPrompt(prompt, mentioned)
@@ -977,7 +955,7 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   // 多人最终提示词组装：count/common tags + 角色块 + 互动 + 构图。
-  function buildMultiPersonFinalPrompt(plan, prompt) {
+  async function buildMultiPersonFinalPrompt(plan, prompt) {
     const aliases = ['Character A', 'Character B', 'Character C', 'Character D']
     const characterCount = plan.characters.length
     const characterRoles = []
@@ -993,7 +971,7 @@ exports.apply = async function apply(ctx, cfg) {
 
     const usedFixedNames = new Set()
     const fixedGenders = []
-    const configuredChars = parsePresetList(cfg.fixedCharacters)
+    const configuredChars = Object.fromEntries((await fixedCharacterRows()).map(({ name, tags }) => [name, tags]))
     for (let index = 0; index < plan.characters.length; index++) {
       const character = plan.characters[index]
       let fixedName = ''
@@ -1407,7 +1385,7 @@ exports.apply = async function apply(ctx, cfg) {
     const plan = planResult.plan
 
     // 组装最终提示词
-    const built = buildMultiPersonFinalPrompt(plan, text)
+    const built = await buildMultiPersonFinalPrompt(plan, text)
     if (!built.ok) {
       return session.text('.multi-usage') + '\n（多人规划失败：' + built.error + '）'
     }
@@ -1431,10 +1409,9 @@ exports.apply = async function apply(ctx, cfg) {
     // 即时反馈
     const notice = []
     if (parsedBatch.clamped) notice.push(session.text('.batch-limit', [count]))
-    const feedback = feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin })
+    const feedback = feedbackBase(session, { firstPosition, count })
     notice.push(...feedback.notices)
     await sendNotices(session, notice)
-    await sendNotices(session, [feedback.chargeNotice], { quote: true })
 
     // 单张生成 +（可选）视觉校验
     const runOne = async (i) => {
@@ -1472,6 +1449,14 @@ exports.apply = async function apply(ctx, cfg) {
       }
     }
 
+    const chargeNotice = buildChargeNotice({
+      isAdmin,
+      totalPrice: successCount * price,
+      unetName: unet,
+      seeds,
+    })
+    await sendNotices(session, [chargeNotice], { quote: true })
+
     if (!allOutputs.length) {
       if (cfg.outputLogs) logger.warn(`多人生成全部失败（${USERID}），已按张退款`)
       return session.text('.generate-failed', ['全部失败（已按张退款）'])
@@ -1489,173 +1474,6 @@ exports.apply = async function apply(ctx, cfg) {
       reply.push(session.text('.generate-ok', [price, seeds[0] || '-']))
     }
     if (notes.length) reply.push(notes.join('\n'))
-    if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
-    return reply.filter(Boolean).join('\n')
-  }
-
-  // 连续图/过程图主流程：同一角色多阶段（固定身份 + 阶段描述 + 全阶段共用同一 seed 保证一致性）
-  // 语法：连续 <角色>：<阶段1> → <阶段2> → ...  或  连续 <角色>：<阶段1>|<阶段2>|...
-  // 询问是否使用 LLM 优化，返回 'yes' / 'no' / 'cancel' / null（无法交互或超时）
-  async function askSeriesLLMUse(session) {
-    if (typeof session.prompt !== 'function') return null
-    await session.send(session.text('.series-llm-ask'))
-    const reply = await session.prompt((cfg.seriesAskTimeout || 60) * 1000).catch(() => null)
-    const ans = String((reply && (reply.content != null ? reply.content : reply)) || '').trim()
-    if (/^(是|1|①|用|使用|使用llm|yes|y)$/i.test(ans)) return 'yes'
-    if (/^(否|2|②|不用|不使用|不使用llm|不优化|不用llm|no|n)$/i.test(ans)) return 'no'
-    if (/^(取消|3|③|算了|不生成|cancel|c)$/i.test(ans)) return 'cancel'
-    if (!ans) return null
-    await session.send(session.text('.series-llm-invalid'))
-    return askSeriesLLMUse(session)
-  }
-
-  async function handleGenerateSeries(session, rawText) {
-    const USERID = session.userId
-    const isAdmin = isAdminUser(session)
-    const unet = await resolveUnet(USERID)
-    const price = Math.max(0, parseInt(cfg.price) || 500)
-
-    // 阶段分隔符：箭头 / 管道
-    const STAGE_SEP = /→|➔|➜|←|↔|=>|->|⇒|\|/
-
-    // 尺寸解析（连续图默认横图）；固定 seed：全阶段共用，支持 --seed 覆盖（含 --seed: 冒号形式）
-    const seedInfo = parseSeed(String(rawText || ''))
-    const seed = seedInfo.seed != null ? seedInfo.seed : crypto.randomInt(1, 2 ** 32 - 1)
-    const allowed = parseAllowedSizes()
-    const parsedSize = parseGenerationSize(seedInfo.prompt, allowed)
-    if (parsedSize.error) return parsedSize.error
-    let size = parsedSize.size
-    if (!size && allowed.length) {
-      size = allowed.reduce((best, s) => {
-        const a = Math.abs(s[0] / s[1] - 16 / 9)
-        const b = Math.abs(best[0] / best[1] - 16 / 9)
-        return a < b ? s : best
-      })
-    }
-    const sizeCleanedPrompt = parsedSize.prompt
-
-    // 提取身份与阶段文本（角色：阶段1 → 阶段2）
-    let identity = ''
-    let stageText = String(sizeCleanedPrompt || '').trim()
-    const colonMatch = stageText.match(/^(.+?)[：:]\s*(.+)$/)
-    if (colonMatch) {
-      identity = colonMatch[1].trim()
-      stageText = colonMatch[2].trim()
-    }
-    const stages = stageText
-      .split(STAGE_SEP)
-      .map(s => s.trim().replace(/^[\s,，、;；:：]+|[\s,，、;；:：]+$/g, '').replace(/\s+/g, ' '))
-      .filter(Boolean)
-    if (!stages.length) return session.text('.series-usage')
-
-    const maxStages = Math.max(1, parseInt(cfg.batchMax) || 4)
-    const count = Math.min(stages.length, maxStages)
-    const clamped = stages.length > count
-    const stageList = stages.slice(0, count)
-
-    // P 点校验（按总价）
-    const pcheck = await precheckPoints(session, USERID, isAdmin, count * price)
-    if (!pcheck.ok) return pcheck.message
-
-    // ComfyUI 就绪
-    const ready = await ensureComfyuiReady()
-    if (!ready.ok) return ready.message
-
-    // 询问是否使用 LLM 优化：是=用 LLM / 否=直接使用原始描述 / 取消=不生成。
-    // 未配置 LLM 或平台不支持交互式询问时，沿用原有「配置了 LLM 就逐阶段优化」行为。
-    let useLLM = true
-    if (cfg.llmModel && cfg.llmBaseUrl && typeof session.prompt === 'function') {
-      const choice = await askSeriesLLMUse(session)
-      if (choice === 'cancel') return ''
-      if (choice === 'no') useLLM = false
-    }
-
-    // 组装各阶段提示词：身份（含固定角色 tags）+ 阶段描述。
-    // 使用 LLM 时逐阶段优化（不受 promptOptimizeEnabled 限制），因为 anima 是
-    // Danbooru-tag 模型，中文阶段描述必须转成 tags 才能体现在画面里；
-    // 用户选择「否」或未配置 LLM 时，直接使用各阶段原始描述（不注入身份前缀）。
-    const fixedChars = parsePresetList(cfg.fixedCharacters)
-    const stagePrompts = []
-    let degradedStages = 0
-    for (const st of stageList) {
-      const base = identity ? `${identity}，${st}` : st
-      const result = useLLM
-        ? await optimizeSeriesStage(base, identity)
-        : { ok: true, prompt: st, drops: [], reason: 'user_skipped_llm' }
-      if (!result.ok) degradedStages += 1
-      const stageTags = result.prompt || base
-      const drops = result.drops || []
-      // 始终注入固定角色 tags 作为身份锚点（保证角色名/种族/尖耳朵出现），
-      // 阶段描述里被明确改变的外观由 drop 列表剔除，避免被固定默认值拉回。
-      const identityTags = identity ? filterFixedTags(fixedChars[identity] || '', drops) : ''
-      const anchor = stageTags
-      const composed = composePrompt(anchor, false, identityTags)
-      stagePrompts.push(composed.prompt)
-    }
-
-    // 扣 P 点（一次性扣除总价）
-    if (!isAdmin) {
-      const saving = await deductP(USERID, count * price)
-      if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 连续图已扣除 ${count * price} P 点（${count} 阶段 × ${price}，seed=${seed}），余额 ${saving - count * price}`)
-    }
-
-    // 队列：预排队全部阶段（先查容量再入队）
-    const queued = await enqueueBatch(count, (i) => runComfyGenerate(stagePrompts[i], size, { seed, unet }), { USERID, isAdmin, totalPrice: count * price })
-    if (!queued.ok) return queued.message
-    const queuedTasks = queued.tasks
-    const firstPosition = queued.firstPosition
-
-    // 即时反馈
-    const notice = []
-    if (clamped) notice.push(session.text('.batch-limit', [count]))
-    if (identity && fixedChars[identity]) notice.push(`已固定角色「${identity}」的身份 tags，各阶段外观将保持一致。`)
-    if (!useLLM) notice.push(session.text('.series-no-llm'))
-    if (degradedStages) notice.push(session.text('.prompt-degraded', ['（连续图阶段优化失败，已使用原始描述）']))
-    const feedback = feedbackBase(session, { firstPosition, count, totalPrice: count * price, isAdmin })
-    notice.push(...feedback.notices)
-    await sendNotices(session, notice)
-    await sendNotices(session, [feedback.chargeNotice], { quote: true })
-
-    // 单阶段生成（共用 seed）
-    const runOne = async (i) => {
-      let result
-      if (cfg.queueEnabled) {
-        try { result = await queuedTasks[i] } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
-      } else {
-        try { result = await runComfyGenerate(stagePrompts[i], size, { seed, unet }) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
-      }
-      return result
-    }
-
-    const { results, successCount } = await executeBatch(USERID, isAdmin, count, price, runOne)
-
-    // 汇总
-    const allOutputs = []
-    const forwardOutputs = []
-    const seeds = []
-    const failures = []
-    for (const item of results) {
-      if (item.ok) {
-        allOutputs.push(...item.outputs)
-        forwardOutputs.push(...item.outputs.map(src => ({ src, prompt: item.prompt || stagePrompts[item.i] || '', negativePrompt: item.negativePrompt })))
-        if (item.seed != null) seeds.push(item.seed)
-      } else {
-        failures.push(`第 ${item.i + 1} 阶段：${item.message}`)
-      }
-    }
-
-    if (!allOutputs.length) {
-      if (cfg.outputLogs) logger.warn(`连续图全部失败（${USERID}），已按阶段退款`)
-      return session.text('.generate-failed', ['全部失败（已按阶段退款）'])
-    }
-
-    if (cfg.outputLogs) logger.success(`${USERID} 连续图生成成功 ${successCount}/${count} 阶段（seed=${seed}）`)
-
-    // 发图：合并转发，不引用原指令
-    await sendImagesAsForward(session, forwardOutputs)
-
-    const reply = []
-    reply.push(session.text('.series-ok', [count * price, successCount, seed]))
     if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
     return reply.filter(Boolean).join('\n')
   }
@@ -1741,7 +1559,6 @@ exports.apply = async function apply(ctx, cfg) {
   // 注意：更新数据里不能带主键 id，否则数据库驱动会报 cannot modify primary key
   function runtimeState() {
     return {
-      fixed_characters: cfg.fixedCharacters || [],
       artist_presets: cfg.artistPresets || [],
       active_artist_preset: cfg.activeArtistPreset || '',
       default_artist_tags: cfg.defaultArtistTags || '',
@@ -1749,20 +1566,25 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
-  // 启动时把数据库里保存的画师组/固定角色合并进 cfg（数据库覆盖配置，保证运行时新增不被重启丢失）
+  let legacyRuntimeFixedCharacters = []
+  let fixedCharactersMigrated = false
+
+  // 启动时加载 p_draw_config 中仍归属该表的运行时数据。
+  // fixed_characters 只作为旧版本迁移输入，运行时不再覆盖 cfg.fixedCharacters。
   async function loadRuntimeState() {
     try {
       const rows = await ctx.database.get('p_draw_config', { id: 1 })
       const row = rows && rows[0]
       if (!row) return
-      if (Array.isArray(row.fixed_characters)) cfg.fixedCharacters = row.fixed_characters
+      if (Array.isArray(row.fixed_characters)) legacyRuntimeFixedCharacters = row.fixed_characters
+      fixedCharactersMigrated = row.fixed_characters_migrated === true
       if (Array.isArray(row.artist_presets)) cfg.artistPresets = row.artist_presets
       if (row.active_artist_preset) cfg.activeArtistPreset = row.active_artist_preset
       if (row.default_artist_tags != null) cfg.defaultArtistTags = row.default_artist_tags
       if (row.user_models && typeof row.user_models === 'object') cfg.userModels = row.user_models
-      if (cfg.outputLogs) logger.info(`[p-draw] 已加载运行时配置（画师组 ${(cfg.artistPresets || []).length} 个，固定角色 ${(cfg.fixedCharacters || []).length} 个，模型偏好 ${Object.keys(cfg.userModels || {}).length} 个）`)
+      if (cfg.outputLogs) logger.info(`[p-draw] 已加载运行时配置（画师组 ${(cfg.artistPresets || []).length} 个，模型偏好 ${Object.keys(cfg.userModels || {}).length} 个）`)
     } catch (e) {
-      logger.warn(`读取运行时配置失败（画师组/固定角色可能未持久化）：${e.message}`)
+      logger.warn(`读取运行时配置失败（画师组或模型偏好可能未持久化）：${e.message}`)
     }
   }
 
@@ -1779,6 +1601,29 @@ exports.apply = async function apply(ctx, cfg) {
     } catch (e) {
       logger.warn(`运行时配置保存失败（重启后可能丢失）：${e.message}`)
     }
+  }
+
+  async function migrateFixedCharacters() {
+    if (fixedCharactersMigrated) return
+    const existingRows = await fixedCharacterRows()
+    const existingNames = new Set(existingRows.map(row => row.name))
+    const legacyEntries = [...(cfg.fixedCharacters || []), ...legacyRuntimeFixedCharacters]
+    for (const entry of legacyEntries) {
+      const parsed = parseNameTags(entry)
+      if (!parsed || existingNames.has(parsed.name)) continue
+      await ctx.database.create('p_draw_fixed_characters', {
+        name: parsed.name,
+        tags: parsed.tags,
+      })
+      existingNames.add(parsed.name)
+    }
+    const existingConfig = await ctx.database.get('p_draw_config', { id: 1 })
+    if (existingConfig && existingConfig[0]) {
+      await ctx.database.set('p_draw_config', { id: 1 }, { fixed_characters_migrated: true })
+    } else {
+      await ctx.database.create('p_draw_config', { id: 1, ...runtimeState(), fixed_characters_migrated: true })
+    }
+    fixedCharactersMigrated = true
   }
 
   function normalizeTagText(text) {
@@ -1811,12 +1656,6 @@ exports.apply = async function apply(ctx, cfg) {
       }
       if (lower === '诊断' || lower === 'diagnose' || lower === '部署诊断' || lower === 'debug' || lower === '调试' || lower === '调试状态') {
         return await diagnoseText(session)
-      }
-
-      // 连续图指令：p-draw 连续 <角色>：<阶段1> → <阶段2>
-      const seriesMatch = text.match(/^连续\s*(.*)$/)
-      if (seriesMatch) {
-        return await handleGenerateSeries(session, seriesMatch[1].trim())
       }
 
       // 多人指令：p-draw 多人 <描述>
@@ -1904,11 +1743,26 @@ exports.apply = async function apply(ctx, cfg) {
       if (addCharacter) {
         const parsed = parseNameTags(addCharacter[1])
         if (!parsed) return session.text('.character-format')
-        const chars = parsePresetList(cfg.fixedCharacters)
-        chars[parsed.name] = normalizeTagText(parsed.tags)
-        await persistConfig('fixedCharacters', Object.entries(chars).map(([n, t]) => `${n}=${t}`))
+        const tags = normalizeTagText(parsed.tags)
+        const existing = (await fixedCharacterRows({ name: parsed.name }))[0]
+        if (existing) await ctx.database.set('p_draw_fixed_characters', { id: existing.id }, { name: parsed.name, tags })
+        else await ctx.database.create('p_draw_fixed_characters', { name: parsed.name, tags })
         if (cfg.outputLogs) logger.success(`${USERID} 添加固定角色 ${parsed.name}`)
         return session.text('.character-created', [parsed.name, parsed.tags])
+      }
+      if (text.match(/^(?:查看|列出|显示)\s*(?:固定)?\s*角色$|^(?:固定)?\s*角色列表$/)) {
+        const rows = await fixedCharacterRows()
+        if (!rows.length) return '固定角色：无'
+        return ['固定角色：', ...rows.map(row => `- ${row.name}：${row.tags}`)].join('\n')
+      }
+      const deleteCharacter = text.match(/^(?:删除|移除)\s*(?:固定)?\s*角色\s*(.*)$/)
+      if (deleteCharacter) {
+        const name = String(deleteCharacter[1]).trim()
+        if (!name) return session.text('.character-delete-format')
+        const existing = (await fixedCharacterRows({ name }))[0]
+        if (!existing) return session.text('.character-not-found', [name])
+        await ctx.database.remove('p_draw_fixed_characters', { id: existing.id })
+        return session.text('.character-deleted', [name])
       }
 
       // 模型切换：p-draw 模型 <名称>（查看）/ p-draw 模型 默认（重置）
@@ -2044,7 +1898,7 @@ exports.apply = async function apply(ctx, cfg) {
     }
     // 非按张优化模式：直接拼好整批复用的提示词
     if (!perImageOptimize) {
-      const composed = composePrompt(finalPrompt, raw)
+      const composed = await composePrompt(finalPrompt, raw)
       finalPrompt = appendInlineProtectedTags(composed.prompt, userPrompt, raw)
       degraded = degraded || composed.degraded
     }
@@ -2069,7 +1923,7 @@ exports.apply = async function apply(ctx, cfg) {
       let p = finalPrompt
       if (perImageOptimize) {
         const optimized = await optimizePrompt(session, userPrompt, true, searchCache)
-        p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
+        p = appendInlineProtectedTags((await composePrompt(optimized.prompt || userPrompt, raw)).prompt, userPrompt, raw)
       }
       const generated = await runComfyGenerate(p, parsedSize.size, generationOverrides)
       return { ...generated, prompt: p }
@@ -2095,17 +1949,16 @@ exports.apply = async function apply(ctx, cfg) {
       notice.push(session.text('.no-optimize', [reasons[noOptimizeReason] || noOptimizeReason]))
     }
     if (parsedBatch.clamped) notice.push(session.text('.batch-limit', [count]))
-    const feedback = feedbackBase(session, { firstPosition, count, totalPrice: count * cfg.price, isAdmin })
+    const feedback = feedbackBase(session, { firstPosition, count })
     notice.push(...feedback.notices)
     await sendNotices(session, notice)
-    await sendNotices(session, [feedback.chargeNotice], { quote: true })
 
     // 单张生成
     const runOne = async (i) => {
       let p = finalPrompt
       if (perImageOptimize) {
         const optimized = await optimizePrompt(session, userPrompt, true, searchCache)
-        p = appendInlineProtectedTags(composePrompt(optimized.prompt || userPrompt, raw).prompt, userPrompt, raw)
+        p = appendInlineProtectedTags((await composePrompt(optimized.prompt || userPrompt, raw)).prompt, userPrompt, raw)
       }
       let result
       if (cfg.queueEnabled) {
@@ -2133,6 +1986,14 @@ exports.apply = async function apply(ctx, cfg) {
         failures.push(`第 ${item.i + 1} 张：${item.message}`)
       }
     }
+
+    const chargeNotice = buildChargeNotice({
+      isAdmin,
+      totalPrice: successCount * cfg.price,
+      unetName: unet,
+      seeds,
+    })
+    await sendNotices(session, [chargeNotice], { quote: true })
 
     if (!allOutputs.length) {
       if (cfg.outputLogs) logger.warn(`生成全部失败（${USERID}），已按张退款`)
@@ -2281,8 +2142,9 @@ exports.apply = async function apply(ctx, cfg) {
     return price
   }
 
-  // 启动时合并数据库里保存的运行时配置（画师组/固定角色）
+  // 启动时加载配置表，并将旧 fixedCharacters 数据迁入专用表。
   await loadRuntimeState()
+  await migrateFixedCharacters()
 
   ctx.on('dispose', () => {
     // 清理临时文件
@@ -2295,5 +2157,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, sendNotices, sendImagesAsForward, executeBatch }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, sendNotices, sendImagesAsForward, executeBatch }
 }
