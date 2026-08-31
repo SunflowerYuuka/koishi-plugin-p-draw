@@ -374,13 +374,14 @@ test('charged batch notice keeps actual seeds in generation order and suppresses
   }), '')
 })
 
-test('successful completion reply excludes charge and seed details', () => {
+test('successful completion reply returns charge details through the command result', () => {
   const session = { text: () => '' }
   assert.strictEqual(iface.buildGenerationReply(session, {
     successCount: 1,
     count: 1,
     failures: [],
-  }), '')
+    chargeNotice: '已扣除 750 P 点，当前模型：anima-base-v1.0.safetensors，--seed=123456',
+  }), '已扣除 750 P 点，当前模型：anima-base-v1.0.safetensors，--seed=123456')
 })
 
 test('batch execution preserves the exact prompt for every successful image', async () => {

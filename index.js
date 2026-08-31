@@ -467,8 +467,9 @@ exports.apply = async function apply(ctx, cfg) {
     return `已扣除 ${totalPrice} P 点，当前模型：${unetName}，--seed=${seeds.join(',')}`
   }
 
-  function buildGenerationReply(session, { successCount, count, failures, notes = [] }) {
+  function buildGenerationReply(session, { successCount, count, failures, notes = [], chargeNotice = '' }) {
     const reply = []
+    if (chargeNotice) reply.push(chargeNotice)
     if (notes.length) reply.push(notes.join('\n'))
     if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
     return reply.filter(Boolean).join('\n')
@@ -1470,8 +1471,6 @@ exports.apply = async function apply(ctx, cfg) {
       unetName: unet,
       seeds,
     })
-    await sendNotices(session, [chargeNotice], { quote: true })
-
     if (!allOutputs.length) {
       if (cfg.outputLogs) logger.warn(`多人生成全部失败（${USERID}），已按张退款`)
       return session.text('.generate-failed', ['全部失败（已按张退款）'])
@@ -1482,7 +1481,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 发图：合并转发，不引用原指令
     await sendImagesAsForward(session, forwardOutputs)
 
-    return buildGenerationReply(session, { successCount, count, failures, notes })
+    return buildGenerationReply(session, { successCount, count, failures, notes, chargeNotice })
   }
 
   // ---------------- 权限 ----------------
@@ -2000,8 +1999,6 @@ exports.apply = async function apply(ctx, cfg) {
       unetName: unet,
       seeds,
     })
-    await sendNotices(session, [chargeNotice], { quote: true })
-
     if (!allOutputs.length) {
       if (cfg.outputLogs) logger.warn(`生成全部失败（${USERID}），已按张退款`)
       return session.text('.generate-failed', ['全部失败（已按张退款）'])
@@ -2012,7 +2009,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 发图：合并转发，不引用原指令
     await sendImagesAsForward(session, forwardOutputs)
 
-    return buildGenerationReply(session, { successCount, count, failures })
+    return buildGenerationReply(session, { successCount, count, failures, chargeNotice })
   }
   // ---------------- 提示词优化券交互式确认 ----------------
   // 仅全局优化关闭 + 非管理员 + 已配置 LLM（tokenOpt 分支）时进入。
