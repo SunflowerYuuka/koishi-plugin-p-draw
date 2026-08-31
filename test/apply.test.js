@@ -341,6 +341,18 @@ test('charged notice formats the effective model and single actual seed as a quo
   assert.ok(sent[0].includes(notice))
 })
 
+test('OneBot charge notices use NapCat reply segments', async () => {
+  const sent = []
+  const session = {
+    platform: 'onebot',
+    messageId: '1969429000',
+    send: async (message) => { sent.push(message) },
+  }
+  await iface.sendNotices(session, ['已扣除 750 P 点，当前模型：anima-base-v1.0.safetensors，--seed=123456'], { quote: true })
+  assert.strictEqual(sent.length, 1)
+  assert.ok(sent[0].includes('<reply id="1969429000"/>'))
+})
+
 test('charged batch notice keeps actual seeds in generation order and suppresses administrators', () => {
   assert.strictEqual(iface.buildChargeNotice({
     isAdmin: false,

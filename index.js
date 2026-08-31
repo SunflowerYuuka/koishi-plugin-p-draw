@@ -478,7 +478,15 @@ exports.apply = async function apply(ctx, cfg) {
     const content = notices.filter(Boolean).join('\n')
     if (!content) return
     try {
-      const message = opts.quote && session.messageId ? h.quote(session.messageId) + content : content
+      const quoteId = session.event?.message?.id || session.messageId
+      let message = content
+      if (opts.quote && quoteId) {
+        const quote = session.platform === 'onebot'
+          ? h('reply', { id: quoteId })
+          : h.quote(quoteId)
+        message = quote + content
+      }
+      if (cfg.outputLogs && opts.quote) logger.info(`[p-draw] 发送扣费引用通知 platform=${session.platform || 'unknown'} messageId=${quoteId || 'missing'}`)
       await session.send(message)
     } catch (e) {
       logger.warn(`发送反馈消息失败：${e.message}`)
