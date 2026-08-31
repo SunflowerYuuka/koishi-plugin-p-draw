@@ -362,6 +362,15 @@ test('charged batch notice keeps actual seeds in generation order and suppresses
   }), '')
 })
 
+test('successful completion reply excludes charge and seed details', () => {
+  const session = { text: () => '' }
+  assert.strictEqual(iface.buildGenerationReply(session, {
+    successCount: 1,
+    count: 1,
+    failures: [],
+  }), '')
+})
+
 test('batch execution preserves the exact prompt for every successful image', async () => {
   const batch = await iface.executeBatch('tester', true, 2, 0, async (index) => ({
     ok: true,

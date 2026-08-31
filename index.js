@@ -467,6 +467,13 @@ exports.apply = async function apply(ctx, cfg) {
     return `已扣除 ${totalPrice} P 点，当前模型：${unetName}，--seed=${seeds.join(',')}`
   }
 
+  function buildGenerationReply(session, { successCount, count, failures, notes = [] }) {
+    const reply = []
+    if (notes.length) reply.push(notes.join('\n'))
+    if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
+    return reply.filter(Boolean).join('\n')
+  }
+
   async function sendNotices(session, notices, opts = {}) {
     const content = notices.filter(Boolean).join('\n')
     if (!content) return
@@ -1467,15 +1474,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 发图：合并转发，不引用原指令
     await sendImagesAsForward(session, forwardOutputs)
 
-    const reply = []
-    if (count > 1) {
-      reply.push(session.text('.generate-ok-batch', [count * price, successCount, seeds.join(', ') || '-']))
-    } else {
-      reply.push(session.text('.generate-ok', [price, seeds[0] || '-']))
-    }
-    if (notes.length) reply.push(notes.join('\n'))
-    if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
-    return reply.filter(Boolean).join('\n')
+    return buildGenerationReply(session, { successCount, count, failures, notes })
   }
 
   // ---------------- 权限 ----------------
@@ -2005,14 +2004,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 发图：合并转发，不引用原指令
     await sendImagesAsForward(session, forwardOutputs)
 
-    const reply = []
-    if (count > 1) {
-      reply.push(session.text('.generate-ok-batch', [count * cfg.price, successCount, seeds.join(', ') || '-']))
-    } else {
-      reply.push(session.text('.generate-ok', [cfg.price, seeds[0] || '-']))
-    }
-    if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
-    return reply.filter(Boolean).join('\n')
+    return buildGenerationReply(session, { successCount, count, failures })
   }
   // ---------------- 提示词优化券交互式确认 ----------------
   // 仅全局优化关闭 + 非管理员 + 已配置 LLM（tokenOpt 分支）时进入。
@@ -2157,5 +2149,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, sendNotices, sendImagesAsForward, executeBatch }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, sendNotices, sendImagesAsForward, executeBatch }
 }
