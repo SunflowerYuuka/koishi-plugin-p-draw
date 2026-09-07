@@ -380,14 +380,33 @@ test('charged batch notice keeps actual seeds in generation order and shows mode
   }), '')
 })
 
-test('successful completion reply returns charge details through the command result', () => {
+test('successful completion sends charge notice directly without a quote segment', async () => {
+  const sent = []
+  const session = {
+    messageId: '1742313783',
+    send: async (message) => { sent.push(message) },
+  }
+  const notice = iface.buildChargeNotice({
+    isAdmin: true,
+    totalPrice: 750,
+    unetName: 'anima-base-v1.0.safetensors',
+    seeds: [123456],
+  })
+  await iface.sendNotices(session, [notice])
+  assert.strictEqual(sent.length, 1)
+  assert.ok(typeof sent[0] === 'string')
+  assert.ok(!sent[0].includes('<quote'))
+  assert.ok(!sent[0].includes('<reply'))
+  assert.ok(sent[0].includes('当前模型：anima-base-v1.0.safetensors，--seed=123456'))
+})
+
+test('successful completion reply carries only failures and notes', () => {
   const session = { text: () => '' }
   assert.strictEqual(iface.buildGenerationReply(session, {
     successCount: 1,
     count: 1,
     failures: [],
-    chargeNotice: '已扣除 750 P 点，当前模型：anima-base-v1.0.safetensors，--seed=123456',
-  }), '已扣除 750 P 点，当前模型：anima-base-v1.0.safetensors，--seed=123456')
+  }), '')
 })
 
 test('batch execution preserves the exact prompt for every successful image', async () => {

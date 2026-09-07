@@ -478,9 +478,8 @@ exports.apply = async function apply(ctx, cfg) {
     return `已扣除 ${totalPrice} P 点，${modelSeed}`
   }
 
-  function buildGenerationReply(session, { successCount, count, failures, notes = [], chargeNotice = '' }) {
+  function buildGenerationReply(session, { successCount, count, failures, notes = [] }) {
     const reply = []
-    if (chargeNotice) reply.push(chargeNotice)
     if (notes.length) reply.push(notes.join('\n'))
     if (failures.length) reply.push(session.text('.batch-partial', [successCount, count, failures.length, failures.join('；')]))
     return reply.filter(Boolean).join('\n')
@@ -1492,7 +1491,9 @@ exports.apply = async function apply(ctx, cfg) {
     // 发图：合并转发，不引用原指令
     await sendImagesAsForward(session, forwardOutputs)
 
-    return buildGenerationReply(session, { successCount, count, failures, notes, chargeNotice })
+    await sendNotices(session, [chargeNotice])
+
+    return buildGenerationReply(session, { successCount, count, failures, notes })
   }
 
   // ---------------- 权限 ----------------
@@ -2020,7 +2021,9 @@ exports.apply = async function apply(ctx, cfg) {
     // 发图：合并转发，不引用原指令
     await sendImagesAsForward(session, forwardOutputs)
 
-    return buildGenerationReply(session, { successCount, count, failures, chargeNotice })
+    await sendNotices(session, [chargeNotice])
+
+    return buildGenerationReply(session, { successCount, count, failures })
   }
   // ---------------- 提示词优化券交互式确认 ----------------
   // 仅全局优化关闭 + 非管理员 + 已配置 LLM（tokenOpt 分支）时进入。
