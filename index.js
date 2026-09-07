@@ -2,6 +2,7 @@ const { Schema, h } = require('koishi')
 const fs = require('fs')
 const fsp = require('fs/promises')
 const path = require('path')
+const os = require('os')
 const crypto = require('crypto')
 const { pathToFileURL } = require('url')
 
@@ -173,10 +174,18 @@ exports.apply = async function apply(ctx, cfg) {
   // 用户自选模型偏好（userid -> unet 文件名），持久化在 p_draw_config.user_models
   if (!cfg.userModels || typeof cfg.userModels !== 'object') cfg.userModels = {}
 
-  const tempDir = path.join(__dirname, 'temp')
-  if (!fs.existsSync(tempDir)) {
-    try { fs.mkdirSync(tempDir, { recursive: true }) } catch (e) { logger.warn('无法创建临时目录：' + e.message) }
-  }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-'))
+  // 启动时清理上次运行遗留的临时文件
+  try {
+    const leftovers = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('pdraw-'))
+    for (const name of leftovers) {
+      const dir = path.join(os.tmpdir(), name)
+      try {
+        for (const file of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, file))
+        fs.rmdirSync(dir)
+      } catch (e) { /* ignore */ }
+    }
+  } catch (e) { /* ignore */ }
 
   const baseUrl = () => normalizeBaseUrl(cfg.comfyuiBaseUrl)
 
@@ -2152,6 +2161,7 @@ exports.apply = async function apply(ctx, cfg) {
       for (const file of files) {
         try { fs.unlinkSync(path.join(tempDir, file)) } catch (e) { /* ignore */ }
       }
+      try { fs.rmdirSync(tempDir) } catch (e) { /* ignore */ }
     } catch (e) { /* ignore */ }
   })
 
