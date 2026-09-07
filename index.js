@@ -463,8 +463,10 @@ exports.apply = async function apply(ctx, cfg) {
   }
 
   function buildChargeNotice({ isAdmin, totalPrice, unetName, seeds }) {
-    if (isAdmin || !seeds.length) return ''
-    return `已扣除 ${totalPrice} P 点，当前模型：${unetName}，--seed=${seeds.join(',')}`
+    if (!seeds.length) return ''
+    const modelSeed = `当前模型：${unetName}，--seed=${seeds.join(',')}`
+    if (isAdmin) return modelSeed
+    return `已扣除 ${totalPrice} P 点，${modelSeed}`
   }
 
   function buildGenerationReply(session, { successCount, count, failures, notes = [], chargeNotice = '' }) {

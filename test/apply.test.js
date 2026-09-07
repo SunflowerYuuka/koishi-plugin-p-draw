@@ -353,7 +353,7 @@ test('OneBot charge notices use NapCat reply segments', async () => {
   assert.ok(sent[0].includes('<reply id="1969429000"/>'))
 })
 
-test('charged batch notice keeps actual seeds in generation order and suppresses administrators', () => {
+test('charged batch notice keeps actual seeds in generation order and shows model/seed to admins', () => {
   assert.strictEqual(iface.buildChargeNotice({
     isAdmin: false,
     totalPrice: 1500,
@@ -365,9 +365,15 @@ test('charged batch notice keeps actual seeds in generation order and suppresses
     totalPrice: 1500,
     unetName: 'animagine-xl-3.1.safetensors',
     seeds: [90210],
-  }), '')
+  }), '当前模型：animagine-xl-3.1.safetensors，--seed=90210')
   assert.strictEqual(iface.buildChargeNotice({
     isAdmin: false,
+    totalPrice: 0,
+    unetName: 'animagine-xl-3.1.safetensors',
+    seeds: [],
+  }), '')
+  assert.strictEqual(iface.buildChargeNotice({
+    isAdmin: true,
     totalPrice: 0,
     unetName: 'animagine-xl-3.1.safetensors',
     seeds: [],
