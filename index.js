@@ -174,8 +174,7 @@ exports.apply = async function apply(ctx, cfg) {
   // 用户自选模型偏好（userid -> unet 文件名），持久化在 p_draw_config.user_models
   if (!cfg.userModels || typeof cfg.userModels !== 'object') cfg.userModels = {}
 
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-'))
-  // 启动时清理上次运行遗留的临时文件
+  // 启动时清理上次运行遗留的临时目录（先清理，再创建本次目录）
   try {
     const leftovers = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('pdraw-'))
     for (const name of leftovers) {
@@ -186,6 +185,8 @@ exports.apply = async function apply(ctx, cfg) {
       } catch (e) { /* ignore */ }
     }
   } catch (e) { /* ignore */ }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-'))
 
   const baseUrl = () => normalizeBaseUrl(cfg.comfyuiBaseUrl)
 
