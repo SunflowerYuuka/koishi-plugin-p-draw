@@ -418,6 +418,13 @@ test('batch execution preserves the exact prompt for every successful image', as
   assert.deepStrictEqual(batch.results.map(item => item.prompt), ['prompt-0', 'prompt-1'])
 })
 
+test('batch LLM optimization is selected per image for global and admin optimization', () => {
+  assert.strictEqual(iface.shouldOptimizePerImage({ count: 1, enabled: true, admin: false }), false)
+  assert.strictEqual(iface.shouldOptimizePerImage({ count: 5, enabled: true, admin: false }), true)
+  assert.strictEqual(iface.shouldOptimizePerImage({ count: 5, enabled: false, admin: true }), true)
+  assert.strictEqual(iface.shouldOptimizePerImage({ count: 5, enabled: false, admin: false }), false)
+})
+
 test('i18n dict exposes generation messages', () => {
   assert.ok(plugin.Config)
   assert.ok(zhCN.commands['p-draw'].messages.generating)

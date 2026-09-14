@@ -485,6 +485,10 @@ exports.apply = async function apply(ctx, cfg) {
     return reply.filter(Boolean).join('\n')
   }
 
+  function shouldOptimizePerImage({ count, enabled, admin }) {
+    return count > 1 && (enabled || admin)
+  }
+
   async function sendNotices(session, notices, opts = {}) {
     const content = notices.filter(Boolean).join('\n')
     if (!content) return
@@ -1868,17 +1872,23 @@ exports.apply = async function apply(ctx, cfg) {
       const adminOpt = !globalOpt && isAdmin && cfg.llmModel && cfg.llmBaseUrl
       const tokenOpt = !globalOpt && !isAdmin && cfg.llmModel && cfg.llmBaseUrl
       if (globalOpt) {
-        // 全局优化开启：一次优化，整批复用同一提示词
-        const optimized = await optimizePrompt(session, userPrompt, false)
-        finalPrompt = optimized.prompt
-        degraded = !optimized.ok
-        optimizedReason = optimized.reason || ''
+        if (shouldOptimizePerImage({ count, enabled: true, admin: false })) {
+          perImageOptimize = true
+        } else {
+          const optimized = await optimizePrompt(session, userPrompt, false)
+          finalPrompt = optimized.prompt
+          degraded = !optimized.ok
+          optimizedReason = optimized.reason || ''
+        }
       } else if (adminOpt) {
-        // 管理员在全局关闭时也免费优化（不耗券）
-        const optimized = await optimizePrompt(session, userPrompt, true)
-        finalPrompt = optimized.prompt
-        degraded = !optimized.ok
-        optimizedReason = optimized.reason || ''
+        if (shouldOptimizePerImage({ count, enabled: false, admin: true })) {
+          perImageOptimize = true
+        } else {
+          const optimized = await optimizePrompt(session, userPrompt, true)
+          finalPrompt = optimized.prompt
+          degraded = !optimized.ok
+          optimizedReason = optimized.reason || ''
+        }
       } else if (tokenOpt) {
         // 全局优化关闭：使用 p-shop 的「提示词优化券」（p_system.llmToken）。
         // 券一次性，按张数扣：x3 扣 3 张，每张图独立做一次 LLM 优化。
@@ -2169,5 +2179,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, sendNotices, sendImagesAsForward, executeBatch }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch }
 }

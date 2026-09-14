@@ -21,6 +21,7 @@ p点-绘图插件，连接本地 ComfyUI 生图，参考 AstrBot 的 [anima 绘�
 - `p-draw 状态` 查看 ComfyUI 连接状态与模型可用性。
 - `p-draw help`（或 `帮助`）查看全部指令帮助，包含生成 / 多人 / 批量张数 / 尺寸 / 画师组 / 状态等。
 - 发图时会以合并转发发送，每张图片后附对应的 Positive / Negative 提示词；生成完成消息会显示实际模型和 seed（如 `已扣除 750 P 点，当前模型：animagine-xl-3.1.safetensors，--seed=123456`）。管理员/免扣费用户不显示扣费金额，但仍显示模型和 seed。
+- 批量生成（如 `x5` / `x10`）开启 LLM 优化时，每张图会在生成前单独重新优化一次提示词；因此 `random color hair`、`random color eyes` 等动态要求可以在不同图片中产生不同结果。
 
 ## 安装
 
