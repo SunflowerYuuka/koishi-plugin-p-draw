@@ -460,17 +460,77 @@ exports.apply = async function apply(ctx, rawConfig) {
   // ---------------- 图生图：从消息取图 → 下载 → 上传到 ComfyUI ----------------
 
   // 消息里带的图片地址（http / file / base64 / data: 都可能有）
+  // 图片元素的 src 在不同适配器里落点不一样：src / url / file 都见过
+  function imageElementSrc(element) {
+    const attrs = (element && element.attrs) || {}
+    const src = attrs.src || attrs.url || attrs.file || attrs.path
+    if (src) return String(src)
+    // 兜底：某些适配器把地址放在 data 里
+    if (element && typeof element.data === 'string' && /^(https?:|base64:|data:|file:)/i.test(element.data)) return element.data
+    return ''
+  }
+
+  // 从消息里收集图片地址。支持：
+  // 1) 同一条消息里的图片（图 + 文字一起发）
+  // 2) 引用的消息里的图片（回复一张图再发指令）
+  // 3) 适配器把消息给成字符串时，从 CQ 码 / 裸链接里捞
   function messageImageSources(session) {
     const sources = []
-    try {
-      const message = session?.event?.message
-      if (!message) return sources
-      for (const element of h.select(message, 'img')) {
-        const src = element?.attrs?.src || element?.attrs?.url
-        if (src) sources.push(String(src))
+    const seen = new Set()
+    const push = (value) => {
+      const text = String(value || '').trim()
+      if (!text || seen.has(text)) return
+      seen.add(text)
+      sources.push(text)
+    }
+
+    const collect = (message) => {
+      if (!message) return
+      if (typeof message === 'string') {
+        // CQ 码：CQ:image,file=xxx / CQ:image,url=xxx
+        for (const m of message.matchAll(/\[CQ:image,[^\]]*?(?:file|url)=([^,\]]+)/gi)) push(m[1])
+        // 裸链接
+        for (const m of message.matchAll(/https?:\/\/[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp)/gi)) push(m[0])
+        return
       }
+      if (Array.isArray(message)) {
+        for (const element of message) {
+          if (!element || typeof element !== 'object') continue
+          const type = String(element.type || '').toLowerCase()
+          if (type === 'img' || type === 'image') {
+            push(imageElementSrc(element))
+          } else if (type === 'quote' || type === 'reply') {
+            // 引用的消息可能还带自己的 elements
+            collect(element.attrs && element.attrs.elements)
+            collect(element.data && element.data.elements)
+          }
+        }
+      }
+    }
+
+    try {
+      collect(session?.event?.message)
+      // 引用场景：部分适配器把被引用消息放在 event.quote / session.quote
+      collect(session?.event?.quote && session.event.quote.elements)
+      collect(session?.quote && session.quote.elements)
     } catch (e) { /* ignore */ }
     return sources
+  }
+
+  // 消息里都有哪些元素类型（图片没识别出来时用来解释原因）
+  function messageElementTypes(session) {
+    const types = []
+    try {
+      const message = session?.event?.message
+      if (typeof message === 'string') return ['text(原始字符串)']
+      if (Array.isArray(message)) {
+        for (const element of message) {
+          const type = String((element && element.type) || '?').toLowerCase()
+          if (!types.includes(type)) types.push(type)
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return types
   }
 
   async function fetchImageBuffer(src) {
@@ -512,10 +572,12 @@ exports.apply = async function apply(ctx, rawConfig) {
 
     const sources = messageImageSources(session)
     if (!sources.length) {
+      const types = messageElementTypes(session)
+      const seen = types.length ? `\n（这条消息里识别到的元素：${types.join('、')}）` : ''
       return {
         ok: false,
         needsImage: true,
-        message: '这个工作流需要图片输入：请把参考图和指令一起发送（例如：发一张图 + 「画图 重绘：保持角色，换成水彩风格」）。',
+        message: '这个工作流需要图片输入：把参考图和指令放在同一条消息里发，或者**回复**一张图再发指令。' + seen,
       }
     }
 
@@ -2713,5 +2775,5 @@ exports.apply = async function apply(ctx, rawConfig) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir, normalizeConfig, presetList, presetOverviewText, presetPrice }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, messageImageSources, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir, normalizeConfig, presetList, presetOverviewText, presetPrice }
 }

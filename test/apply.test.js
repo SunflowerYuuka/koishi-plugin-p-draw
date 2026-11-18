@@ -664,3 +664,48 @@ test('the legacy workflow display field no longer collides with the workflow gro
   assert.strictEqual(c.legacy.legacyWorkflow, 'anima_t2i')
   assert.ok('workflowPresets' in c.workflow, 'workflow 分组仍然正常')
 })
+
+// ---------------- 从消息里取参考图 ----------------
+
+test('image sources come from the same message, quoted messages, and raw CQ strings', () => {
+  const f = iface.messageImageSources
+  const session = (message) => ({ event: { message } })
+
+  // 1) 图 + 文字同一条消息（用户最常见的方式）
+  assert.deepStrictEqual(
+    f(session([
+      { type: 'text', attrs: { content: 'anm' } },
+      { type: 'img', attrs: { src: 'http://cdn/1.png' } },
+      { type: 'text', attrs: { content: '重绘 保持角色' } },
+    ])),
+    ['http://cdn/1.png'],
+  )
+
+  // 2) 适配器用 url / file 而不是 src
+  assert.deepStrictEqual(f(session([{ type: 'image', attrs: { url: 'http://cdn/2.png' } }])), ['http://cdn/2.png'])
+  assert.deepStrictEqual(f(session([{ type: 'img', attrs: { file: 'base64://AAAA' } }])), ['base64://AAAA'])
+
+  // 3) 回复一张图再发指令：图在被引用的消息里
+  assert.deepStrictEqual(
+    f(session([
+      { type: 'quote', attrs: { elements: [{ type: 'img', attrs: { src: 'http://cdn/3.png' } }] } },
+      { type: 'text', attrs: { content: 'anm 重绘' } },
+    ])),
+    ['http://cdn/3.png'],
+  )
+  assert.deepStrictEqual(
+    f({ event: { message: [{ type: 'text', attrs: {} }] }, quote: { elements: [{ type: 'img', attrs: { src: 'http://cdn/4.png' } }] } }),
+    ['http://cdn/4.png'],
+  )
+
+  // 4) 适配器把消息给成字符串：CQ 码与裸链接
+  assert.deepStrictEqual(f(session('[CQ:image,file=http://cdn/5.png]')), ['http://cdn/5.png'])
+  assert.deepStrictEqual(f(session('看这个 https://cdn/6.jpg 好看吗')), ['https://cdn/6.jpg'])
+
+  // 5) 没有图、重复图去重
+  assert.deepStrictEqual(f(session([{ type: 'text', attrs: { content: 'hello' } }])), [])
+  assert.deepStrictEqual(
+    f(session([{ type: 'img', attrs: { src: 'http://cdn/7.png' } }, { type: 'img', attrs: { src: 'http://cdn/7.png' } }])),
+    ['http://cdn/7.png'],
+  )
+})
