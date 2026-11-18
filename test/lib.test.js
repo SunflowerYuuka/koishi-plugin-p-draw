@@ -730,13 +730,29 @@ test('createOutboundFetch falls back to a direct request when no proxy is config
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => { calls.push({ url, options }); return { ok: true } }
   try {
-    const outbound = net.createOutboundFetch({ getProxy: () => '' })
+    const outbound = net.createOutboundFetch({})
+    await outbound('https://api.tavily.com/search', { method: 'POST' }, '')
     await outbound('https://api.tavily.com/search', { method: 'POST' })
-    assert.strictEqual(calls.length, 1)
+    assert.strictEqual(calls.length, 2)
     assert.strictEqual(calls[0].options.dispatcher, undefined, '直连时不应带 dispatcher')
+    assert.strictEqual(calls[1].options.dispatcher, undefined)
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test('each LLM channel can carry its own proxy', () => {
+  const chain = llm.buildLlmChain({
+    llmBaseUrl: 'https://primary.test/v1',
+    llmModels: ['m1'],
+    llmChannels: {
+      viaProxy: { baseUrl: 'https://relay.test/v1', apiKey: 'k', models: ['m2'], proxy: '127.0.0.1:7890' },
+      noProxy: { baseUrl: 'https://direct.test/v1', apiKey: 'k', models: ['m3'] },
+    },
+  })
+  assert.strictEqual(chain[0].proxy, '', '主通道不绑定代理，由 llmProxy 决定')
+  assert.strictEqual(chain[1].proxy, '127.0.0.1:7890', '通道自带代理应透传')
+  assert.strictEqual(chain[2].proxy, '', '未配置代理的通道留空，由用途默认代理兜底')
 })
 
 test('modelParams override custom workflow values even when the global switch is off', () => {

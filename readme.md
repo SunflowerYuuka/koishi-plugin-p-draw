@@ -10,7 +10,7 @@ p点-绘图插件，连接本地 ComfyUI 生图，参考 AstrBot 的 [anima 绘�
 - 自然语言自动优化为 Danbooru tags（可选，需配置 LLM 接口）。
 - **多模型 / 中转站回退**：同一组 url+key 下可填多个模型名逐个尝试，全挂了再切下一个 url+key；兼容非 DeepSeek 站点（不硬发 `thinking`），可用 `llmExtraBody` 追加站点私有参数。
 - 联网搜索：描述中带 `联网`/`搜索`/`查一下` 等词时自动补充角色设定（需 Tavily Key）。
-- **可选代理**：`httpProxy` 一个开关同时作用于联网搜索、LLM 与视觉校验，留空即直连。
+- **可选代理（分用途单独配置）**：`tavilyProxy` / `llmProxy` / `verifyLlmProxy` 三个独立开关，分别作用于联网搜索、LLM、视觉校验，留空即直连；LLM 通道还能各自指定专用代理。
 - 原样 tags 模式（`无优化` 前缀）。
 - 尺寸选择：`竖图` `横图` `方图` `长竖图` `宽屏`，或 `1024x1536：描述` / `--尺寸 1216x832`。
 - 采样参数临时覆盖（可选）：`画图 少女 --cfg 3.5 --steps 40`（也可写 `--强度 3.5` / `--步数 40`）。优先级：命令级 > `modelParams` > 全局配置；参数会从提示词里剥离，不会混进 tags。
@@ -68,12 +68,11 @@ plugins:
 
 控制台里配置分成 **12 个可折叠小节**：①–⑥ 常用项默认展开，⑦–⑫ 进阶项默认折叠。`koishi.yml` 里的键仍然是**扁平**的（见文末示例），分组只影响界面显示，旧配置无需迁移。
 
-### ① 连接与网络代理
+### ① ComfyUI 连接
 
 | 项 | 说明 |
 |----|------|
 | `comfyuiBaseUrl` | ComfyUI API 地址（默认 `http://127.0.0.1:8188`） |
-| `httpProxy` | 出站代理，**可留空直连**。作用于联网搜索 / LLM / 视觉校验。格式 `http://127.0.0.1:7890`、`socks5://127.0.0.1:7891`，可省略 `http://`。需要宿主环境能解析到 `undici`（Koishi 默认自带） |
 | `timeout` / `pollInterval` | 单次生成超时（秒，默认 300）、状态查询间隔（秒，默认 2） |
 
 ### ② 模型与采样参数
@@ -141,6 +140,7 @@ plugins:
 |----|------|
 | `promptOptimizeEnabled` | 启用自然语言优化 |
 | `llmBaseUrl` / `llmApiKey` | 主通道接口地址与 Key（OpenAI 兼容） |
+| `llmProxy` | **仅 LLM** 使用代理，留空直连（详见「中转站、多模型与代理」） |
 | `llmModels` | 主通道的**模型名列表**，按顺序逐个尝试（如 `["deepseek-chat","gpt-4o-mini"]`）。旧的 `llmModel` 单模型仍兼容 |
 | `llmChannels` | 附加通道（中转站/备用站）：`通道名 → { baseUrl, apiKey, models }`。主通道所有模型都失败后按顺序继续试 |
 | `llmChannelOrder` | 附加通道的尝试顺序（填通道名；留空则按配置先后顺序） |
@@ -154,6 +154,7 @@ plugins:
 | 项 | 说明 |
 |----|------|
 | `webSearchEnabled` / `tavilyApiKey` | 联网搜索开关与 Tavily Key |
+| `tavilyProxy` | **仅联网搜索**使用代理，留空直连 |
 | `webSearchMaxResults` / `webSearchDepth` / `webSearchQueryTemplate` | 结果数量、搜索深度、搜索词模板 |
 
 ### ⑪ 多人视觉校验（折叠）
@@ -163,6 +164,7 @@ plugins:
 | `multiVerifyEnabled` / `multiVerifyPassScore` | 校验开关与合格分数（0-10） |
 | `multiCandidateCount` / `multiSendDegradedCandidate` | 候选采样数与全部不达标时是否仍发送最优候选 |
 | `verifyLlmBaseUrl` / `verifyLlmApiKey` / `verifyLlmModels` | 视觉模型（需支持图片输入，如 qwen-vl）。和文本侧一样支持多模型逐个尝试 |
+| `verifyLlmProxy` | **仅视觉校验**使用代理，留空直连 |
 | `verifyLlmChannels` / `verifyLlmChannelOrder` | 视觉侧的附加通道与尝试顺序（结构同 `llmChannels`） |
 
 ### ⑫ 兼容项（折叠）
@@ -230,15 +232,34 @@ llmChannelOrder:
 llmExtraBody: '{"enable_thinking": false, "top_p": 0.9}'
 ```
 
-### 代理（可选）
+### 代理（可选，按用途分开）
 
-`httpProxy` 留空就是直连。填了之后**联网搜索（Tavily）、LLM、视觉校验**都走它：
+三个代理**互相独立**，都留空就是直连：
+
+| 配置项 | 作用范围 | 所在分组 |
+|---|---|---|
+| `tavilyProxy` | 只影响联网搜索（Tavily） | ⑩ 联网搜索 |
+| `llmProxy` | 只影响提示词优化 / 多人规划的文本 LLM | ⑨ 提示词优化 / LLM |
+| `verifyLlmProxy` | 只影响多人视觉校验的视觉模型 | ⑪ 多人视觉校验 |
 
 ```yaml
-httpProxy: http://127.0.0.1:7890   # 也支持 socks5://127.0.0.1:7891，或直接写 127.0.0.1:7890
+tavilyProxy: http://127.0.0.1:7890      # 只给搜索走代理
+llmProxy: ''                            # LLM 直连
+verifyLlmProxy: socks5://127.0.0.1:7891 # 视觉模型走另一个
 ```
 
-若宿主的 Koishi 里解析不到 `undici`，插件会降级直连并在日志里告警一次，其它功能不受影响。
+`llmChannels` / `verifyLlmChannels` 里每个通道还可以填 `proxy` 指定**该通道专用**代理，优先级高于上面三个用途级配置：
+
+```yaml
+llmChannels:
+  海外中转:
+    baseUrl: https://overseas.example.com/v1
+    apiKey: sk-zzz
+    models: [gpt-4o-mini]
+    proxy: http://127.0.0.1:7890   # 只有这个通道走代理
+```
+
+格式都支持 `http://`、`socks5://`，也可省略协议直接写 `127.0.0.1:7890`。若宿主的 Koishi 里解析不到 `undici`，该代理会被忽略并告警一次，其余功能不受影响。
 
 ## 工作流对接：Anima Aesthetic 1.1
 

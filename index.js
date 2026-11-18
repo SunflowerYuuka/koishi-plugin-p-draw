@@ -39,10 +39,9 @@ exports.Config = Schema.intersect([
   // ---------------- 常用（默认展开） ----------------
   Schema.object({
     comfyuiBaseUrl: Schema.string().default('http://127.0.0.1:8188').description('ComfyUI 地址'),
-    httpProxy: Schema.string().default('').description('出站代理（可留空直连）。作用于联网搜索 / LLM / 视觉校验，格式如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891，可省略 http://'),
     timeout: Schema.number().default(300).description('单次生成超时（秒）'),
     pollInterval: Schema.number().default(2).description('生成状态查询间隔（秒）'),
-  }).description('① 连接与网络代理'),
+  }).description('① ComfyUI 连接'),
 
   Schema.object({
     unetName: Schema.string().default('anima-aesthetic-v1.1.safetensors').description('主模型文件名，需与 ComfyUI models/diffusion_models 下的文件名完全一致；8G 显存可填 .gguf 版（插件自动改用 UnetLoaderGGUF）'),
@@ -124,12 +123,14 @@ exports.Config = Schema.intersect([
     promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需配置下面的 LLM 接口）'),
     llmBaseUrl: Schema.string().default('').description('LLM 接口地址（OpenAI 兼容，如 https://api.deepseek.com/v1）'),
     llmApiKey: Schema.string().role('secret').default('').description('LLM API Key'),
+    llmProxy: Schema.string().default('').description('仅 LLM 使用代理（留空直连）。格式 http://127.0.0.1:7890 / socks5://127.0.0.1:7891，可省略 http://。通道内单独填了 proxy 则优先用通道的'),
     llmModel: Schema.string().default('').description('LLM 模型名（旧版单模型；请在 llmModels 里配置，这里留空即可）'),
     llmModels: Schema.array(Schema.string()).default([]).description('主通道的模型名列表，按顺序逐个尝试（如 ["deepseek-chat","gpt-4o-mini"]）'),
     llmChannels: Schema.dict(Schema.object({
       baseUrl: Schema.string().description('接口地址（OpenAI 兼容）'),
       apiKey: Schema.string().role('secret').description('API Key'),
       models: Schema.array(Schema.string()).description('该通道的模型名列表，按顺序尝试'),
+      proxy: Schema.string().description('该通道专用代理（留空则用上面的 llmProxy）'),
     }).description('通道')).default({}).description('附加通道（中转站/备用站）：主通道全部模型都失败后，按顺序继续尝试这些通道'),
     llmChannelOrder: Schema.array(Schema.string()).default([]).description('附加通道的尝试顺序（填通道名；留空则按配置里的先后顺序）'),
     llmThinking: Schema.union([
@@ -145,6 +146,7 @@ exports.Config = Schema.intersect([
   Schema.object({
     webSearchEnabled: Schema.boolean().default(false).description('启用联网搜索（指令里写「联网/搜索/查一下」触发）'),
     tavilyApiKey: Schema.string().role('secret').default('').description('Tavily API Key（https://tavily.com）'),
+    tavilyProxy: Schema.string().default('').description('仅联网搜索（Tavily）使用代理（留空直连）。格式 http://127.0.0.1:7890，可省略 http://。与 LLM / 视觉校验的代理互相独立'),
     webSearchMaxResults: Schema.number().default(5).description('搜索结果数量'),
     webSearchDepth: Schema.string().default('basic').description('搜索深度（basic / advanced）'),
     webSearchQueryTemplate: Schema.string().default('{prompt} 角色 外观 立绘 服装 配色 武器 官方图 official art character design outfit appearance wiki fandom').description('搜索词模板（{prompt} 代表用户需求）'),
@@ -157,12 +159,14 @@ exports.Config = Schema.intersect([
     multiSendDegradedCandidate: Schema.boolean().default(true).description('全部候选不达标时仍发送最优候选'),
     verifyLlmBaseUrl: Schema.string().default('').description('视觉校验接口地址（OpenAI 兼容；留空跳过校验）'),
     verifyLlmApiKey: Schema.string().role('secret').default('').description('视觉校验 API Key'),
+    verifyLlmProxy: Schema.string().default('').description('仅视觉校验使用代理（留空直连）。通道内单独填了 proxy 则优先用通道的'),
     verifyLlmModel: Schema.string().default('').description('视觉校验模型名（旧版单模型；请在 verifyLlmModels 里配置）'),
     verifyLlmModels: Schema.array(Schema.string()).default([]).description('视觉通道的模型名列表，按顺序逐个尝试（需支持图片输入，如 qwen-vl）'),
     verifyLlmChannels: Schema.dict(Schema.object({
       baseUrl: Schema.string().description('接口地址（OpenAI 兼容）'),
       apiKey: Schema.string().role('secret').description('API Key'),
       models: Schema.array(Schema.string()).description('该通道的模型名列表，按顺序尝试'),
+      proxy: Schema.string().description('该通道专用代理（留空则用上面的 verifyLlmProxy）'),
     }).description('通道')).default({}).description('视觉校验的附加通道：主通道全部失败后按顺序继续尝试'),
     verifyLlmChannelOrder: Schema.array(Schema.string()).default([]).description('视觉附加通道的尝试顺序（填通道名；留空则按配置先后顺序）'),
   }).description('⑪ 多人视觉校验').collapse(),
@@ -204,9 +208,8 @@ exports.apply = async function apply(ctx, cfg) {
   const logger = ctx.logger('p-draw')
   ctx.i18n.define('zh-CN', zhCN)
 
-  // 出站请求（联网搜索 / LLM / 视觉校验共用）：按 cfg.httpProxy 决定是否走代理
+  // 出站请求：代理按用途各自传入（联网搜索 / 文本 LLM / 视觉校验互不影响）
   const outboundFetch = createOutboundFetch({
-    getProxy: () => cfg.httpProxy,
     onWarn: (message) => logger.warn(message),
   })
 
@@ -919,7 +922,7 @@ exports.apply = async function apply(ctx, cfg) {
           topic: 'general',
         }),
         signal: controller.signal,
-      })
+      }, cfg.tavilyProxy)
       if (!rawRes.ok) {
         const bodyText = await rawRes.text().catch(() => '')
         logger.warn(`联网搜索接口返回错误：HTTP ${rawRes.status} ${bodyText.slice(0, 200)}`)
@@ -979,12 +982,15 @@ exports.apply = async function apply(ctx, cfg) {
         const headers = { 'Content-Type': 'application/json' }
         if (candidate.apiKey) headers.Authorization = `Bearer ${candidate.apiKey}`
         const body = buildChatBody(cfg, { candidate, messages, maxTokens, defaultMaxTokens: maxTokens })
+        // 代理按用途分开：通道自带 proxy 优先，否则用该用途的默认代理
+        const purposeProxy = role === 'vision' ? cfg.verifyLlmProxy : cfg.llmProxy
+        const proxy = candidate.proxy || purposeProxy || ''
         const rawRes = await outboundFetch(candidate.baseUrl + '/chat/completions', {
           method: 'POST',
           headers,
           body: JSON.stringify(body),
           signal: controller.signal,
-        })
+        }, proxy)
         if (!rawRes.ok) {
           const detail = await rawRes.text().catch(() => '')
           throw new Error(`HTTP ${rawRes.status}${detail ? ' ' + detail.slice(0, 200) : ''}`)
