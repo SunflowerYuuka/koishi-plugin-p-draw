@@ -10,6 +10,8 @@ const tags = require('../lib/tags')
 const wf = require('../lib/workflows')
 const comfy = require('../lib/comfy')
 const multi = require('../lib/multi')
+const llm = require('../lib/llm')
+const net = require('../lib/net')
 
 // 统一的测试临时目录：进程退出时自动清理，避免在系统临时目录留下垃圾
 const tempDirs = []
@@ -604,4 +606,168 @@ test('parseStepsCfg does not eat ordinary prompt text', () => {
   assert.strictEqual(r.prompt, '1girl, steps on stairs, cfg 7')
   // --seed 不能被误判成 --steps
   assert.strictEqual(parse.parseStepsCfg('a --seed 42').steps, null)
+})
+
+// ---------------- lib/llm.js：通道 × 模型回退 ----------------
+
+test('splitModelList accepts arrays and separated strings', () => {
+  assert.deepStrictEqual(llm.splitModelList(['a', 'b']), ['a', 'b'])
+  assert.deepStrictEqual(llm.splitModelList('a, b，c\nd'), ['a', 'b', 'c', 'd'])
+  assert.deepStrictEqual(llm.splitModelList(''), [])
+  assert.deepStrictEqual(llm.splitModelList(['a', 'a']), ['a'])
+  assert.deepStrictEqual(llm.splitModelList(null), [])
+})
+
+test('buildLlmChain tries every model of the primary channel, then the other channels', () => {
+  const chain = llm.buildLlmChain({
+    llmBaseUrl: 'https://api.deepseek.com/',
+    llmApiKey: 'k1',
+    llmModels: ['deepseek-chat', 'deepseek-reasoner'],
+    llmChannels: {
+      relayA: { baseUrl: 'https://relay-a.test/v1', apiKey: 'ka', models: ['gpt-4o-mini'] },
+      relayB: { baseUrl: 'https://relay-b.test/v1', apiKey: 'kb', models: ['qwen-max'] },
+    },
+    llmChannelOrder: ['relayB', 'relayA'],
+  })
+  assert.deepStrictEqual(chain.map(c => c.model),
+    ['deepseek-chat', 'deepseek-reasoner', 'qwen-max', 'gpt-4o-mini'])
+  assert.strictEqual(chain[0].baseUrl, 'https://api.deepseek.com')
+  assert.strictEqual(chain[0].label, '主通道')
+  assert.strictEqual(chain[2].label, 'relayB')
+})
+
+test('buildLlmChain keeps legacy single llmModel working and skips incomplete channels', () => {
+  const legacy = llm.buildLlmChain({ llmBaseUrl: 'https://x.test/v1', llmModel: 'm1' })
+  assert.deepStrictEqual(legacy.map(c => c.model), ['m1'])
+
+  const partial = llm.buildLlmChain({
+    llmBaseUrl: 'https://x.test/v1',
+    llmModels: ['m1'],
+    llmChannels: { broken: { apiKey: 'k' }, noModels: { baseUrl: 'https://y.test' } },
+  })
+  assert.deepStrictEqual(partial.map(c => c.model), ['m1'])
+  assert.strictEqual(llm.hasLlm({}), false)
+  assert.strictEqual(llm.hasLlm({ llmBaseUrl: 'https://x.test', llmModels: ['m'] }), true)
+})
+
+test('vision role reads verifyLlm* config and its own channel dict', () => {
+  const chain = llm.buildLlmChain({
+    llmBaseUrl: 'https://text.test', llmModels: ['text-model'],
+    verifyLlmBaseUrl: 'https://vision.test', verifyLlmModels: ['qwen-vl'],
+    verifyLlmChannels: { backup: { baseUrl: 'https://vb.test', apiKey: 'k', models: ['glm-4v'] } },
+  }, 'vision')
+  assert.deepStrictEqual(chain.map(c => c.model), ['qwen-vl', 'glm-4v'])
+  assert.strictEqual(chain[0].baseUrl, 'https://vision.test')
+})
+
+test('thinking is only sent to DeepSeek endpoints unless forced', () => {
+  const deepseek = { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' }
+  const relay = { baseUrl: 'https://relay.test/v1', model: 'gpt-4o-mini' }
+
+  assert.strictEqual(llm.shouldSendThinking({}, deepseek), true)
+  assert.strictEqual(llm.shouldSendThinking({}, relay), false, '中转站默认不带 thinking')
+  assert.strictEqual(llm.shouldSendThinking({ llmThinking: 'always' }, relay), true)
+  assert.strictEqual(llm.shouldSendThinking({ llmThinking: 'never' }, deepseek), false)
+})
+
+test('buildChatBody merges extra body last and respects thinking mode', () => {
+  const cfg = { llmExtraBody: '{"enable_thinking":false,"max_tokens":123}' }
+  const body = llm.buildChatBody(cfg, {
+    candidate: { baseUrl: 'https://relay.test', model: 'gpt-4o-mini' },
+    messages: [{ role: 'user', content: 'hi' }],
+    maxTokens: 500,
+  })
+  assert.strictEqual(body.thinking, undefined)
+  assert.strictEqual(body.enable_thinking, false)
+  assert.strictEqual(body.max_tokens, 123, 'extraBody 应最后覆盖')
+
+  const deep = llm.buildChatBody({}, {
+    candidate: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
+    messages: [], maxTokens: 64,
+  })
+  assert.deepStrictEqual(deep.thinking, { type: 'disabled' })
+
+  // 非法 JSON 不应炸
+  assert.deepStrictEqual(llm.parseExtraBody('not json'), {})
+})
+
+test('runLlmChain falls through failing candidates and reports why', async () => {
+  const tried = []
+  const result = await llm.runLlmChain(
+    [{ model: 'a', label: 'A' }, { model: 'b', label: 'B' }, { model: 'c', label: 'C' }],
+    async (candidate) => {
+      tried.push(candidate.model)
+      if (candidate.model === 'a') throw new Error('HTTP 401')
+      if (candidate.model === 'b') throw new Error('HTTP 402')
+      return 'ok-from-c'
+    },
+  )
+  assert.strictEqual(result.ok, true)
+  assert.strictEqual(result.value, 'ok-from-c')
+  assert.strictEqual(result.candidate.model, 'c')
+  assert.deepStrictEqual(tried, ['a', 'b', 'c'])
+  assert.deepStrictEqual(result.errors.map(e => e.message), ['HTTP 401', 'HTTP 402'])
+
+  const failed = await llm.runLlmChain([{ model: 'x', label: 'X' }], async () => { throw new Error('boom') })
+  assert.strictEqual(failed.ok, false)
+  assert.strictEqual(failed.value, null)
+  assert.strictEqual(failed.errors.length, 1)
+})
+
+// ---------------- lib/net.js：可选代理 ----------------
+
+test('normalizeProxyUrl defaults the protocol and ignores empty input', () => {
+  assert.strictEqual(net.normalizeProxyUrl(''), '')
+  assert.strictEqual(net.normalizeProxyUrl(null), '')
+  assert.strictEqual(net.normalizeProxyUrl('127.0.0.1:7890'), 'http://127.0.0.1:7890')
+  assert.strictEqual(net.normalizeProxyUrl('http://127.0.0.1:7890'), 'http://127.0.0.1:7890')
+  assert.strictEqual(net.normalizeProxyUrl('socks5://127.0.0.1:7891'), 'socks5://127.0.0.1:7891')
+  assert.strictEqual(net.resolveDispatcher(''), null, '未配置代理时不建 dispatcher')
+})
+
+test('createOutboundFetch falls back to a direct request when no proxy is configured', async () => {
+  const calls = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => { calls.push({ url, options }); return { ok: true } }
+  try {
+    const outbound = net.createOutboundFetch({ getProxy: () => '' })
+    await outbound('https://api.tavily.com/search', { method: 'POST' })
+    assert.strictEqual(calls.length, 1)
+    assert.strictEqual(calls[0].options.dispatcher, undefined, '直连时不应带 dispatcher')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('modelParams override custom workflow values even when the global switch is off', () => {
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'wf.json', baselineGraph())
+  wf.clearWorkflowCache()
+  // 工作流内是 steps=20 / cfg=7 / sampler=euler / scheduler=normal / 512x512
+  const base = {
+    customWorkflowEnabled: true,
+    customWorkflowPath: file,
+    customWorkflowOverrideParameters: false, // 总开关关闭
+  }
+
+  // 1) 只配了 steps/cfg → 只覆盖这两个，采样器保持工作流里的值
+  const w1 = wf.customWorkflow(baseCfg(base), 'P', 'N', 768, 1344, 45, 3.5, 7, false,
+    { modelParams: { steps: 45, cfg: 3.5 } })
+  assert.strictEqual(w1['3'].inputs.steps, 45, 'modelParams 显式配置应覆盖工作流')
+  assert.strictEqual(w1['3'].inputs.cfg, 3.5)
+  assert.strictEqual(w1['3'].inputs.sampler_name, 'euler', '未配置的字段不应被改动')
+  assert.strictEqual(w1['3'].inputs.scheduler, 'normal')
+  assert.strictEqual(w1['5'].inputs.width, 512, '未配置尺寸时不应覆盖尺寸')
+
+  // 2) 配了 width/height → 尺寸被覆盖
+  const w2 = wf.customWorkflow(baseCfg(base), 'P', 'N', 768, 1344, 45, 3.5, 7, false,
+    { modelParams: { width: 768, height: 1344 } })
+  assert.strictEqual(w2['5'].inputs.width, 768)
+  assert.strictEqual(w2['5'].inputs.height, 1344)
+
+  // 3) 什么都不配且总开关关闭 → 完全保持工作流原值（旧行为不变）
+  const w3 = wf.customWorkflow(baseCfg(base), 'P', 'N', 768, 1344, 45, 3.5, 7, false)
+  assert.strictEqual(w3['3'].inputs.steps, 20)
+  assert.strictEqual(w3['3'].inputs.cfg, 7)
+  assert.strictEqual(w3['5'].inputs.width, 512)
 })

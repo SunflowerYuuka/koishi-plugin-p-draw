@@ -39,9 +39,10 @@ exports.Config = Schema.intersect([
   // ---------------- 常用（默认展开） ----------------
   Schema.object({
     comfyuiBaseUrl: Schema.string().default('http://127.0.0.1:8188').description('ComfyUI 地址'),
+    httpProxy: Schema.string().default('').description('出站代理（可留空直连）。作用于联网搜索 / LLM / 视觉校验，格式如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891，可省略 http://'),
     timeout: Schema.number().default(300).description('单次生成超时（秒）'),
     pollInterval: Schema.number().default(2).description('生成状态查询间隔（秒）'),
-  }).description('① ComfyUI 连接'),
+  }).description('① 连接与网络代理'),
 
   Schema.object({
     unetName: Schema.string().default('anima-aesthetic-v1.1.safetensors').description('主模型文件名，需与 ComfyUI models/diffusion_models 下的文件名完全一致；8G 显存可填 .gguf 版（插件自动改用 UnetLoaderGGUF）'),
@@ -63,7 +64,7 @@ exports.Config = Schema.intersect([
 
   Schema.object({
     qualityPrefix: Schema.string().default('').description('质量词前缀（Aesthetic 1.1 建议留空；Base 模型可填 masterpiece, best quality, score_7）'),
-    negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词'),
+    negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词。推荐值就是当前默认值：worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts（Aesthetic 1.1 适用）。若用 Base 模型，可再加 score_4, score_5, score_6；不想要画师署名可保留 artist name'),
     styleTags: Schema.string().default('').description('画风 tags'),
     defaultArtistTags: Schema.string().default('').description('备用画师 tags'),
     activeArtistPreset: Schema.string().default('').description('启用的画师组名称'),
@@ -123,7 +124,20 @@ exports.Config = Schema.intersect([
     promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需配置下面的 LLM 接口）'),
     llmBaseUrl: Schema.string().default('').description('LLM 接口地址（OpenAI 兼容，如 https://api.deepseek.com/v1）'),
     llmApiKey: Schema.string().role('secret').default('').description('LLM API Key'),
-    llmModel: Schema.string().default('').description('LLM 模型名（留空则不优化）'),
+    llmModel: Schema.string().default('').description('LLM 模型名（旧版单模型；请在 llmModels 里配置，这里留空即可）'),
+    llmModels: Schema.array(Schema.string()).default([]).description('主通道的模型名列表，按顺序逐个尝试（如 ["deepseek-chat","gpt-4o-mini"]）'),
+    llmChannels: Schema.dict(Schema.object({
+      baseUrl: Schema.string().description('接口地址（OpenAI 兼容）'),
+      apiKey: Schema.string().role('secret').description('API Key'),
+      models: Schema.array(Schema.string()).description('该通道的模型名列表，按顺序尝试'),
+    }).description('通道')).default({}).description('附加通道（中转站/备用站）：主通道全部模型都失败后，按顺序继续尝试这些通道'),
+    llmChannelOrder: Schema.array(Schema.string()).default([]).description('附加通道的尝试顺序（填通道名；留空则按配置里的先后顺序）'),
+    llmThinking: Schema.union([
+      Schema.const('auto').description('仅 DeepSeek 系接口发送 thinking（推荐）'),
+      Schema.const('always').description('总是发送 thinking'),
+      Schema.const('never').description('从不发送 thinking（部分中转站必须选这个）'),
+    ]).default('auto').description('是否发送 DeepSeek 专有的 thinking 字段；非 DeepSeek 模型带了通常会被拒'),
+    llmExtraBody: Schema.string().role('textarea').default('{}').description('附加请求体 JSON（最后覆盖），用于中转站私有参数，如 {"enable_thinking":false}'),
     llmMaxTokens: Schema.number().default(1000).description('LLM 输出上限'),
     promptOptimizeTemplate: Schema.string().description('优化模板（支持 {theme} {search_block} {character_rule} 占位符）').default('你是为 Anima 图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 除上述明确要求外，可以自由决定服装细节、姿态、构图、镜头、背景、环境、光影、色彩、氛围、前景和特效。\n- 以最终图像协调、精致、有表现力和好看为优先，不需要机械追求固定 Tag 数量。\n- 不要为了数量重复同义词；画面已经完整时即可停止。\n- 请自行解决明显冲突，直接输出你认为最适合生成最终画面的版本。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}'),
   }).description('⑨ 提示词优化 / LLM').collapse(),
@@ -143,7 +157,14 @@ exports.Config = Schema.intersect([
     multiSendDegradedCandidate: Schema.boolean().default(true).description('全部候选不达标时仍发送最优候选'),
     verifyLlmBaseUrl: Schema.string().default('').description('视觉校验接口地址（OpenAI 兼容；留空跳过校验）'),
     verifyLlmApiKey: Schema.string().role('secret').default('').description('视觉校验 API Key'),
-    verifyLlmModel: Schema.string().default('').description('视觉校验模型名（需支持图片输入，如 qwen-vl）'),
+    verifyLlmModel: Schema.string().default('').description('视觉校验模型名（旧版单模型；请在 verifyLlmModels 里配置）'),
+    verifyLlmModels: Schema.array(Schema.string()).default([]).description('视觉通道的模型名列表，按顺序逐个尝试（需支持图片输入，如 qwen-vl）'),
+    verifyLlmChannels: Schema.dict(Schema.object({
+      baseUrl: Schema.string().description('接口地址（OpenAI 兼容）'),
+      apiKey: Schema.string().role('secret').description('API Key'),
+      models: Schema.array(Schema.string()).description('该通道的模型名列表，按顺序尝试'),
+    }).description('通道')).default({}).description('视觉校验的附加通道：主通道全部失败后按顺序继续尝试'),
+    verifyLlmChannelOrder: Schema.array(Schema.string()).default([]).description('视觉附加通道的尝试顺序（填通道名；留空则按配置先后顺序）'),
   }).description('⑪ 多人视觉校验').collapse(),
 
   Schema.object({
@@ -174,12 +195,20 @@ const {
   renderMultiPersonCharacter, multiPersonAutoSize,
 } = require('./lib/multi')
 const { buildComfyClient } = require('./lib/http')
+const { createOutboundFetch, normalizeProxyUrl, proxySupportAvailable } = require('./lib/net')
+const { buildLlmChain, hasLlm, buildChatBody, runLlmChain } = require('./lib/llm')
 exports.apply = async function apply(ctx, cfg) {
   // 注意：不在此处 extend p_system 表 —— 该表由 p-qiandao 等 p 系插件创建。
   // 重复声明同一张表可能导致 Koishi 的 schema 迁移冲突，拖垮签到插件。
 
   const logger = ctx.logger('p-draw')
   ctx.i18n.define('zh-CN', zhCN)
+
+  // 出站请求（联网搜索 / LLM / 视觉校验共用）：按 cfg.httpProxy 决定是否走代理
+  const outboundFetch = createOutboundFetch({
+    getProxy: () => cfg.httpProxy,
+    onWarn: (message) => logger.warn(message),
+  })
 
   // 运行时数据持久化到数据库，而不是调用 scope.update
   // 写 koishi.yml：scope.update 会触发插件重载，导致正在生成的图被 dispose（Context has
@@ -749,7 +778,7 @@ exports.apply = async function apply(ctx, cfg) {
     const cfgVal = Number(overrides.cfg) || workCfg.cfg
     const seed = Number(overrides.seed) || crypto.randomInt(1, 2 ** 32 - 1)
     const negativePrompt = joinPromptParts([overrides.negativePrompt || cfg.negativePrompt || ''])
-    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), workflowOpts())
+    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), Object.assign({}, workflowOpts(), { modelParams: modelSpecific }))
 
     const clientId = crypto.randomUUID()
     const submit = await comfyPost('/prompt', { prompt: promptBody, client_id: clientId }, 20000)
@@ -879,7 +908,7 @@ exports.apply = async function apply(ctx, cfg) {
       const query = queryTemplate.includes('{prompt}')
         ? queryTemplate.replace(/\{prompt\}/g, prompt).trim()
         : `${prompt} ${queryTemplate}`.trim()
-      const rawRes = await fetch('https://api.tavily.com/search', {
+      const rawRes = await outboundFetch('https://api.tavily.com/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -921,12 +950,74 @@ exports.apply = async function apply(ctx, cfg) {
     }
   }
 
+  // 统一调用 LLM：按「通道 × 模型」候选链逐个尝试，返回首个成功结果。
+  // role='text' 用 llm* 配置，role='vision' 用 verifyLlm* 配置（需支持图片输入）。
+  async function callLlm({ role = 'text', system, user, images, maxTokens = 700, timeout = 120000 }) {
+    const chain = buildLlmChain(cfg, role)
+    if (!chain.length) {
+      return { ok: false, text: '', reason: 'llm_not_configured', candidate: null, errors: [] }
+    }
+
+    const messages = []
+    if (system) messages.push({ role: 'system', content: system })
+    if (images && images.length) {
+      messages.push({
+        role: 'user',
+        content: [
+          ...(user ? [{ type: 'text', text: user }] : []),
+          ...images.map((src) => ({ type: 'image_url', image_url: { url: src } })),
+        ],
+      })
+    } else {
+      messages.push({ role: 'user', content: user })
+    }
+
+    const result = await runLlmChain(chain, async (candidate) => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeout)
+      try {
+        const headers = { 'Content-Type': 'application/json' }
+        if (candidate.apiKey) headers.Authorization = `Bearer ${candidate.apiKey}`
+        const body = buildChatBody(cfg, { candidate, messages, maxTokens, defaultMaxTokens: maxTokens })
+        const rawRes = await outboundFetch(candidate.baseUrl + '/chat/completions', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+        if (!rawRes.ok) {
+          const detail = await rawRes.text().catch(() => '')
+          throw new Error(`HTTP ${rawRes.status}${detail ? ' ' + detail.slice(0, 200) : ''}`)
+        }
+        const res = await rawRes.json()
+        const text = extractLlmText(res)
+        if (!text) throw new Error('接口未返回可用的文本内容')
+        return text
+      } finally {
+        clearTimeout(timer)
+      }
+    }, {
+      onError: (candidate, message) => {
+        if (cfg.outputLogs) logger.warn(`[p-draw] LLM 候选失败（${candidate.label} / ${candidate.model}）：${message}`)
+      },
+    })
+
+    if (!result.ok) {
+      const last = result.errors.length ? result.errors[result.errors.length - 1].message : 'unknown'
+      return { ok: false, text: '', reason: last, candidate: null, errors: result.errors }
+    }
+    if (cfg.outputLogs && (chain.length > 1 || result.errors.length)) {
+      logger.info(`[p-draw] LLM 命中 ${result.candidate.label} / ${result.candidate.model}（前面失败 ${result.errors.length} 个）`)
+    }
+    return { ok: true, text: result.value, candidate: result.candidate, errors: result.errors }
+  }
+
   async function optimizePrompt(session, userPrompt, force = false, precomputedSearch = null) {
     if (!cfg.promptOptimizeEnabled && !force) {
       return { ok: true, prompt: userPrompt, reason: 'optimize_disabled' }
     }
-    if (!cfg.llmModel || !cfg.llmBaseUrl) {
-      logger.warn('提示词优化已开启但未配置 llmModel / llmBaseUrl，跳过优化')
+    if (!hasLlm(cfg)) {
+      logger.warn('提示词优化已开启但未配置任何 LLM 通道（llmBaseUrl + llmModels），跳过优化')
       return { ok: false, prompt: userPrompt, reason: 'llm_not_configured' }
     }
     let searchBlock = ''
@@ -949,50 +1040,17 @@ exports.apply = async function apply(ctx, cfg) {
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 120000)
-    try {
-      const headers = { 'Content-Type': 'application/json' }
-      if (cfg.llmApiKey) headers.Authorization = `Bearer ${cfg.llmApiKey}`
-      const rawRes = await fetch(
-        String(cfg.llmBaseUrl).replace(/\/+$/, '') + '/chat/completions',
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            model: cfg.llmModel,
-            messages: [
-              { role: 'system', content: rendered },
-              { role: 'user', content: userPrompt },
-            ],
-            max_tokens: Math.max(64, parseInt(cfg.llmMaxTokens) || 1000),
-            // DeepSeek V4 默认开启思考模式，改为关闭以保证 content 直接返回 tags
-            thinking: { type: 'disabled' },
-          }),
-          signal: controller.signal,
-        },
-      )
-      if (!rawRes.ok) {
-        const bodyText = await rawRes.text().catch(() => '')
-        const reason = `HTTP ${rawRes.status}${bodyText ? ' ' + bodyText.slice(0, 200) : ''}`
-        logger.warn(`提示词优化接口返回错误：${reason}`)
-        return { ok: false, prompt: userPrompt, reason }
-      }
-      const res = await rawRes.json()
-      const text = extractLlmText(res)
-      if (!text) {
-        const reason = '接口未返回可用的文本内容'
-        logger.warn(`提示词优化：${reason} 原始响应=${JSON.stringify(res).slice(0, 500)}`)
-        return { ok: false, prompt: userPrompt, reason }
-      }
-      return { ok: true, prompt: text }
-    } catch (e) {
-      const reason = String(e && e.message || e)
-      logger.warn(`提示词优化失败：${reason}`)
-      return { ok: false, prompt: userPrompt, reason }
-    } finally {
-      clearTimeout(timer)
+    const outcome = await callLlm({
+      role: 'text',
+      system: rendered,
+      user: userPrompt,
+      maxTokens: cfg.llmMaxTokens,
+    })
+    if (!outcome.ok) {
+      logger.warn(`提示词优化失败（已尝试 ${outcome.errors.length} 个候选）：${outcome.reason}`)
+      return { ok: false, prompt: userPrompt, reason: outcome.reason }
     }
+    return { ok: true, prompt: outcome.text }
   }
 
   // ---------------- 提示词组装 ----------------
@@ -1024,43 +1082,13 @@ exports.apply = async function apply(ctx, cfg) {
   // ---------------- 多人（移植自 anima /anm 多人） ----------------
 
   // 通用 LLM 调用：system + user，返回文本；失败抛错由调用方捕获。
-  async function llmChat({ system, user, maxTokens = 700, baseUrl, apiKey, model, timeout = 120000 }) {
-    const resolvedBase = baseUrl || cfg.llmBaseUrl
-    const resolvedKey = apiKey || cfg.llmApiKey
-    const resolvedModel = model || cfg.llmModel
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeout)
-    try {
-      const headers = { 'Content-Type': 'application/json' }
-      if (resolvedKey) headers.Authorization = `Bearer ${resolvedKey}`
-      const rawRes = await fetch(
-        String(resolvedBase).replace(/\/+$/, '') + '/chat/completions',
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            model: resolvedModel,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: user },
-            ],
-            max_tokens: Math.max(64, parseInt(maxTokens) || 700),
-            thinking: { type: 'disabled' },
-          }),
-          signal: controller.signal,
-        },
-      )
-      if (!rawRes.ok) {
-        const bodyText = await rawRes.text().catch(() => '')
-        throw new Error(`HTTP ${rawRes.status}${bodyText ? ' ' + bodyText.slice(0, 200) : ''}`)
-      }
-      const res = await rawRes.json()
-      const text = extractLlmText(res)
-      if (!text) throw new Error('接口未返回可用的文本内容')
-      return text
-    } finally {
-      clearTimeout(timer)
+  // 多人规划用的文本 LLM 调用：统一走「通道 × 模型」回退链，全部失败才抛错。
+  async function llmChat({ system, user, maxTokens = 700, timeout = 120000 }) {
+    const outcome = await callLlm({ role: 'text', system, user, maxTokens, timeout })
+    if (!outcome.ok) {
+      throw new Error(outcome.reason === 'llm_not_configured' ? '未配置任何 LLM 通道' : outcome.reason)
     }
+    return outcome.text
   }
 
   // 多人规划：让 LLM 输出结构化场景 JSON（2-4 人）。
@@ -1298,9 +1326,7 @@ exports.apply = async function apply(ctx, cfg) {
   // 视觉校验（anima_verify + generation_verifier 移植）：对生成的图片跑视觉 LLM，
   // 不合格则用相同提示词重试（最多 multiCandidateCount 张），按多候选规则挑选并返回结果。
   async function verifyGeneratedImages(session, images, userRequest, prompt, size, planCount, unet, negativePrompt) {
-    const verifyBaseUrl = String(cfg.verifyLlmBaseUrl || '').trim()
-    const verifyModel = String(cfg.verifyLlmModel || '').trim()
-    if (!verifyBaseUrl || !verifyModel) {
+    if (!hasLlm(cfg, 'vision')) {
       return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt, negativePrompt }
     }
     const passScore = Math.max(0, Math.min(10, parseInt(cfg.multiVerifyPassScore) || 6))
@@ -1314,38 +1340,17 @@ exports.apply = async function apply(ctx, cfg) {
     let currentPrompt = prompt
     let currentNegativePrompt = negativePrompt
 
+    // 视觉校验同样走「通道 × 模型」回退链（role='vision' 用 verifyLlm* 配置）
     async function verifyOnce(imgs, userReq) {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 120000)
-      try {
-        const headers = { 'Content-Type': 'application/json' }
-        if (cfg.verifyLlmApiKey) headers.Authorization = `Bearer ${cfg.verifyLlmApiKey}`
-        const content = imgs.map(src => ({ type: 'image_url', image_url: { url: src } }))
-        const rawRes = await fetch(
-          verifyBaseUrl.replace(/\/+$/, '') + '/chat/completions',
-          {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model: verifyModel,
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: [{ type: 'text', text: `用户的原始画图请求（中文）：\n${userReq}\n\n请审查这张图片。` }, ...content] },
-              ],
-              max_tokens: Math.max(256, parseInt(cfg.llmMaxTokens) || 700),
-            }),
-            signal: controller.signal,
-          },
-        )
-        if (!rawRes.ok) {
-          const bodyText = await rawRes.text().catch(() => '')
-          throw new Error(`HTTP ${rawRes.status}${bodyText ? ' ' + bodyText.slice(0, 200) : ''}`)
-        }
-        const res = await rawRes.json()
-        return extractLlmText(res)
-      } finally {
-        clearTimeout(timer)
-      }
+      const outcome = await callLlm({
+        role: 'vision',
+        system: systemPrompt,
+        user: `用户的原始画图请求（中文）：\n${userReq}\n\n请审查这张图片。`,
+        images: imgs,
+        maxTokens: Math.max(256, parseInt(cfg.llmMaxTokens) || 700),
+      })
+      if (!outcome.ok) throw new Error(outcome.reason)
+      return outcome.text
     }
 
     function extractVerifyJson(text) {
@@ -1537,7 +1542,7 @@ exports.apply = async function apply(ctx, cfg) {
     if (!ready.ok) return ready.message
 
     // 多人规划（强制依赖 LLM）
-    if (!cfg.llmModel || !cfg.llmBaseUrl) {
+    if (!hasLlm(cfg)) {
       return session.text('.multi-no-llm')
     }
 
@@ -2014,8 +2019,8 @@ exports.apply = async function apply(ctx, cfg) {
     let interactiveCoupon = false
     if (!raw) {
       const globalOpt = cfg.promptOptimizeEnabled
-      const adminOpt = !globalOpt && isAdmin && cfg.llmModel && cfg.llmBaseUrl
-      const tokenOpt = !globalOpt && !isAdmin && cfg.llmModel && cfg.llmBaseUrl
+      const adminOpt = !globalOpt && isAdmin && hasLlm(cfg)
+      const tokenOpt = !globalOpt && !isAdmin && hasLlm(cfg)
       if (globalOpt) {
         if (shouldOptimizePerImage({ count, enabled: true, admin: false })) {
           perImageOptimize = true

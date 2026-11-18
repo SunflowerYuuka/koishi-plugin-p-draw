@@ -266,3 +266,92 @@ test('end-to-end: --steps / --cfg override the workflow and never leak into the 
     if (savedWebSocket) globalThis.WebSocket = savedWebSocket
   }
 })
+
+test('end-to-end: failed LLM model falls through to the next one in the same channel', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+
+  const llmCalls = []
+  const captured = { prompt: null }
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1')
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('end', () => {
+      if (req.method === 'POST' && url.pathname === '/prompt') {
+        captured.prompt = JSON.parse(body).prompt
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ prompt_id: 'p1' }))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
+        const parsed = JSON.parse(body)
+        llmCalls.push({ model: parsed.model, hasThinking: 'thinking' in parsed })
+        if (parsed.model === 'bad-model') {
+          res.statusCode = 500
+          res.end('upstream exploded')
+          return
+        }
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ choices: [{ message: { content: '1girl, solo, optimized-tags' } }] }))
+        return
+      }
+      if (url.pathname === '/system_stats') {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ system: { comfyui_version: 'stub' }, devices: [{ name: 'StubGPU', vram_total: 8 * 1024 ** 3, vram_free: 7 * 1024 ** 3 }] }))
+        return
+      }
+      if (url.pathname === '/history/p1') {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ p1: { status: { status_str: 'success' }, outputs: { '10': { images: [{ filename: 'a.png', subfolder: '', type: 'output' }] } } } }))
+        return
+      }
+      if (url.pathname === '/view') { res.setHeader('Content-Type', 'image/png'); res.end(PNG); return }
+      res.statusCode = 404
+      res.end('{}')
+    })
+  })
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  try {
+    const baseDir = tmpDir('pdrawtest-e2e-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    fs.writeFileSync(path.join(wfDir, 'anima-aesthetic-v1.1.json'), JSON.stringify(aestheticGraph()))
+
+    const { ctx, actions } = makeCtx(baseDir)
+    const plugin = require('../index.js')
+    const config = Object.assign(makeCfg(port), {
+      promptOptimizeEnabled: true,
+      llmBaseUrl: `http://127.0.0.1:${port}/v1`,
+      llmApiKey: 'test-key',
+      llmModel: '',
+      llmModels: ['bad-model', 'good-model'],
+    })
+    await plugin.apply(ctx, config)
+
+    const session = {
+      userId: '10001',
+      platform: 'onebot',
+      messageId: 'm3',
+      event: { message: { id: 'm3' } },
+      text: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''),
+      send: async () => {},
+    }
+
+    await actions[0]({ session }, '一个女孩站在河岸')
+
+    // 第一个模型失败后必须自动换第二个
+    assert.deepStrictEqual(llmCalls.map(c => c.model), ['bad-model', 'good-model'])
+    // 非 DeepSeek 端点默认不应携带 thinking（中转站常见 400 原因）
+    assert.ok(llmCalls.every(c => c.hasThinking === false), '不应向非 DeepSeek 端点发送 thinking')
+    // 最终用的是第二个模型返回的 tags
+    assert.ok(captured.prompt, '应已向 ComfyUI 提交')
+    assert.strictEqual(captured.prompt['4'].inputs.text, '1girl, solo, optimized-tags')
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})

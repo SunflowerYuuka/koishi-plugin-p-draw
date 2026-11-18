@@ -8,7 +8,9 @@ p点-绘图插件，连接本地 ComfyUI 生图，参考 AstrBot 的 [anima 绘�
 - `p-draw 多人 <描述>` 多人生图（2-4 人画面）：LLM 结构化规划人物分组、互动关系与统一场景，未指定尺寸时按人数/肢体接触自动选横图，生成后可选视觉校验。
 - 批量张数：描述后加 `x3` / `×3` / `3张` / `三张` / `--数量 3` 可一次生成多张（上限 `batchMax`，默认 4），按张数 × 单价扣 P 点。
 - 自然语言自动优化为 Danbooru tags（可选，需配置 LLM 接口）。
+- **多模型 / 中转站回退**：同一组 url+key 下可填多个模型名逐个尝试，全挂了再切下一个 url+key；兼容非 DeepSeek 站点（不硬发 `thinking`），可用 `llmExtraBody` 追加站点私有参数。
 - 联网搜索：描述中带 `联网`/`搜索`/`查一下` 等词时自动补充角色设定（需 Tavily Key）。
+- **可选代理**：`httpProxy` 一个开关同时作用于联网搜索、LLM 与视觉校验，留空即直连。
 - 原样 tags 模式（`无优化` 前缀）。
 - 尺寸选择：`竖图` `横图` `方图` `长竖图` `宽屏`，或 `1024x1536：描述` / `--尺寸 1216x832`。
 - 采样参数临时覆盖（可选）：`画图 少女 --cfg 3.5 --steps 40`（也可写 `--强度 3.5` / `--步数 40`）。优先级：命令级 > `modelParams` > 全局配置；参数会从提示词里剥离，不会混进 tags。
@@ -66,11 +68,12 @@ plugins:
 
 控制台里配置分成 **12 个可折叠小节**：①–⑥ 常用项默认展开，⑦–⑫ 进阶项默认折叠。`koishi.yml` 里的键仍然是**扁平**的（见文末示例），分组只影响界面显示，旧配置无需迁移。
 
-### ① ComfyUI 连接
+### ① 连接与网络代理
 
 | 项 | 说明 |
 |----|------|
 | `comfyuiBaseUrl` | ComfyUI API 地址（默认 `http://127.0.0.1:8188`） |
+| `httpProxy` | 出站代理，**可留空直连**。作用于联网搜索 / LLM / 视觉校验。格式 `http://127.0.0.1:7890`、`socks5://127.0.0.1:7891`，可省略 `http://`。需要宿主环境能解析到 `undici`（Koishi 默认自带） |
 | `timeout` / `pollInterval` | 单次生成超时（秒，默认 300）、状态查询间隔（秒，默认 2） |
 
 ### ② 模型与采样参数
@@ -86,7 +89,7 @@ plugins:
 
 | 项 | 说明 |
 |----|------|
-| `qualityPrefix` / `negativePrompt` | 质量词前缀与负面词。默认 `qualityPrefix` 为空（Aesthetic 1.1 不需要质量标签），`negativePrompt` 为 Aesthetic 推荐值；从 Base 模型迁移时再把前缀填回 `masterpiece, best quality, score_7` |
+| `qualityPrefix` / `negativePrompt` | 质量词前缀与负面词。默认 `qualityPrefix` 为空（Aesthetic 1.1 不需要质量标签），`negativePrompt` 为 Aesthetic 推荐值；从 Base 模型迁移时再把前缀填回 `masterpiece, best quality, score_7`。**负面词推荐值**：`worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts`（即默认值；Base 模型可再加 `score_4, score_5, score_6`） |
 | `styleTags` / `defaultArtistTags` | 画风 tags、备用画师 tags |
 | `activeArtistPreset` / `artistPresets` | 启用的画师组名称与画师组列表 |
 | `fixedCharacters` | 固定角色（仅兼容旧配置，运行时以数据库为准） |
@@ -121,7 +124,7 @@ plugins:
 |----|------|
 | `customWorkflowEnabled` / `customWorkflowPath` | 启用自定义工作流 JSON；路径相对 Koishi 运行目录解析 |
 | `skipQualityPrefixForCustomWorkflow` | 启用自定义工作流时跳过质量前缀注入（默认 `true`） |
-| `customWorkflowOverrideParameters` | 用插件参数覆盖工作流内的采样参数 |
+| `customWorkflowOverrideParameters` | 用插件参数覆盖工作流内的采样参数（总开关）。注意：`modelParams` 里显式写了的字段不受这个开关限制，永远覆盖 |
 | `customWorkflowReloadOnChange` | 工作流文件变化时自动重载，无需重启（默认 `true`） |
 | `positivePromptNodeId` / `negativePromptNodeId` | 正/负面提示词节点 ID；留空自动识别 |
 | `resolutionNodeId` / `seedNodeId` / `stepsNodeId` | 尺寸 / 种子 / 步数节点 ID；可留空（留空则按节点类型覆盖） |
@@ -130,13 +133,19 @@ plugins:
 
 | 项 | 说明 |
 |----|------|
-| `modelParams` | 字典：`key`=模型文件名，`value` 只填要覆盖的 `samplerName` / `scheduler` / `steps` / `cfg` / `width` / `height`。匹配不区分大小写与 `-` `_`。优先级：命令级 `--steps`/`--cfg` > 本节 > 全局配置 |
+| `modelParams` | 字典：`key`=模型文件名，`value` 只填要覆盖的 `samplerName` / `scheduler` / `steps` / `cfg` / `width` / `height`。匹配不区分大小写与 `-` `_`。**只要在 `modelParams` 里写了某个字段，它就会覆盖工作流内的值——包括自定义工作流**（不受 `customWorkflowOverrideParameters` 开关限制）。优先级：命令级 `--steps`/`--cfg` > 本节 > 全局配置 |
 
 ### ⑨ 提示词优化 / LLM（折叠）
 
 | 项 | 说明 |
 |----|------|
-| `promptOptimizeEnabled` / `llmBaseUrl` / `llmApiKey` / `llmModel` | 自然语言优化（OpenAI 兼容接口） |
+| `promptOptimizeEnabled` | 启用自然语言优化 |
+| `llmBaseUrl` / `llmApiKey` | 主通道接口地址与 Key（OpenAI 兼容） |
+| `llmModels` | 主通道的**模型名列表**，按顺序逐个尝试（如 `["deepseek-chat","gpt-4o-mini"]`）。旧的 `llmModel` 单模型仍兼容 |
+| `llmChannels` | 附加通道（中转站/备用站）：`通道名 → { baseUrl, apiKey, models }`。主通道所有模型都失败后按顺序继续试 |
+| `llmChannelOrder` | 附加通道的尝试顺序（填通道名；留空则按配置先后顺序） |
+| `llmThinking` | 是否发送 DeepSeek 专有的 `thinking` 字段。`auto`（默认，仅 DeepSeek 域名发送）/ `always` / `never`。**非 DeepSeek 模型带上它常被直接拒绝，中转站建议保持 auto 或改 never** |
+| `llmExtraBody` | 附加请求体 JSON，最后覆盖。用于中转站私有参数，如 `{"enable_thinking":false}` |
 | `llmMaxTokens` | LLM 输出上限 |
 | `promptOptimizeTemplate` | 优化模板（支持 `{theme}` `{search_block}` `{character_rule}` 占位符） |
 
@@ -153,7 +162,8 @@ plugins:
 |----|------|
 | `multiVerifyEnabled` / `multiVerifyPassScore` | 校验开关与合格分数（0-10） |
 | `multiCandidateCount` / `multiSendDegradedCandidate` | 候选采样数与全部不达标时是否仍发送最优候选 |
-| `verifyLlmBaseUrl` / `verifyLlmApiKey` / `verifyLlmModel` | 视觉模型（需支持图片输入；留空则跳过校验） |
+| `verifyLlmBaseUrl` / `verifyLlmApiKey` / `verifyLlmModels` | 视觉模型（需支持图片输入，如 qwen-vl）。和文本侧一样支持多模型逐个尝试 |
+| `verifyLlmChannels` / `verifyLlmChannelOrder` | 视觉侧的附加通道与尝试顺序（结构同 `llmChannels`） |
 
 ### ⑫ 兼容项（折叠）
 
@@ -174,6 +184,61 @@ p-draw:0z81el:
   # customWorkflowEnabled: true
   # customWorkflowPath: data/p-draw/workflows/anima-aesthetic-v1.1.json
 ```
+
+## 中转站、多模型与代理
+
+### 多模型逐个回退
+
+同一个 `baseUrl` + `apiKey` 下可以填**多个模型名**，按顺序逐个尝试；前一个失败（网络错误 / 非 2xx / 返回空文本）自动换下一个：
+
+```yaml
+llmBaseUrl: https://relay.example.com/v1
+llmApiKey: sk-xxx
+llmModels:
+  - deepseek-chat
+  - gpt-4o-mini
+```
+
+如果这一组模型全挂了，再切换到下一个「通道」（另一组 url + key）：
+
+```yaml
+llmChannels:
+  备用站:                      # 通道名自取，只用于排序和日志
+    baseUrl: https://backup.example.com/v1
+    apiKey: sk-yyy
+    models:
+      - qwen-max
+llmChannelOrder:
+  - 备用站
+```
+
+调用顺序：主通道的 `llmModels` 依次 → 全部失败 → `llmChannels` 里各通道的 `models` 依次。日志会记录每个候选的失败原因（`outputLogs` 开启时）。**视觉校验（`verifyLlm*`）规则完全相同**，只是配置项换成 `verifyLlmModels` / `verifyLlmChannels` / `verifyLlmChannelOrder`。
+
+### 中转站兼容
+
+请求体默认**只在 DeepSeek 域名下**附加 `thinking` 字段——很多中转站/其它模型不认识它，带上会被直接 400。特殊情况用 `llmThinking` 调：
+
+| 取值 | 行为 |
+|---|---|
+| `auto`（默认） | 仅当 `baseUrl` 或模型名含 `deepseek` 时发送 |
+| `always` | 总是发送（自建 DeepSeek 中转站用） |
+| `never` | 从不发送（域名像 DeepSeek 但网关不认这个字段时用） |
+
+站点私有参数用 `llmExtraBody` 追加，**最后覆盖**，所以也能改 `max_tokens` 等：
+
+```yaml
+llmExtraBody: '{"enable_thinking": false, "top_p": 0.9}'
+```
+
+### 代理（可选）
+
+`httpProxy` 留空就是直连。填了之后**联网搜索（Tavily）、LLM、视觉校验**都走它：
+
+```yaml
+httpProxy: http://127.0.0.1:7890   # 也支持 socks5://127.0.0.1:7891，或直接写 127.0.0.1:7890
+```
+
+若宿主的 Koishi 里解析不到 `undici`，插件会降级直连并在日志里告警一次，其它功能不受影响。
 
 ## 工作流对接：Anima Aesthetic 1.1
 
