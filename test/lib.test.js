@@ -1134,3 +1134,50 @@ test('decodeDataUrl and guessContentType', () => {
   assert.strictEqual(image.guessContentType('a.webp'), 'image/webp')
   assert.strictEqual(image.guessContentType('noext'), 'image/png')
 })
+
+// ---------------- 修复回归：条件中转节点 / 图生图无需 latent 起点 ----------------
+
+test('positive/negative resolve correctly through a conditioning relay node', () => {
+  // 重绘类工作流：采样器的条件来自 InpaintModelConditioning（它自己也带 positive/negative）
+  const graph = {
+    1: { class_type: 'UNETLoader', inputs: { unet_name: 'm.safetensors' } },
+    2: { class_type: 'CLIPLoader', inputs: { clip_name: 'c.safetensors', type: 'qwen_image', device: 'default' } },
+    3: { class_type: 'VAELoader', inputs: { vae_name: 'v.safetensors' } },
+    4: { class_type: 'CLIPTextEncode', inputs: { text: 'positive prompt', clip: ['2', 0] } },
+    5: { class_type: 'CLIPTextEncode', inputs: { text: 'negative prompt', clip: ['2', 0] } },
+    7: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+    42: { class_type: 'SegsToCombinedMask', inputs: { segs: ['41', 0] } },
+    41: { class_type: 'SegmDetectorSEGS', inputs: { image: ['7', 0] } },
+    46: {
+      class_type: 'InpaintModelConditioning',
+      inputs: { positive: ['4', 0], negative: ['5', 0], vae: ['3', 0], pixels: ['7', 0], mask: ['42', 0], noise_mask: true },
+    },
+    11: { class_type: 'ClownsharKSampler_Beta', inputs: { model: ['1', 0], positive: ['46', 0], negative: ['46', 1], latent_image: ['46', 2], seed: 1, steps: 20, cfg: 3, sampler_name: 'linear/euler', scheduler: 'beta57', denoise: 1 } },
+  }
+  const dir = tmpDir('pdrawtest-relay-')
+  const file = writeWorkflowFile(dir, 'relay.json', graph)
+  wf.clearWorkflowCache()
+  const report = wf.inspectWorkflowFile(file, {}, { baseDir: dir })
+  assert.strictEqual(report.ok, true, '中转节点工作流应判为可用：' + (report.error || ''))
+  assert.deepStrictEqual(report.targets.positive, ['4'], '正面应只命中 #4，不能把负面的 #5 也带进来')
+  assert.deepStrictEqual(report.targets.negative, ['5'])
+})
+
+test('an img2img workflow needs no empty-latent node to count as usable', () => {
+  const graph = {
+    1: { class_type: 'UNETLoader', inputs: { unet_name: 'm.safetensors' } },
+    2: { class_type: 'CLIPLoader', inputs: { clip_name: 'c.safetensors', type: 'qwen_image', device: 'default' } },
+    3: { class_type: 'VAELoader', inputs: { vae_name: 'v.safetensors' } },
+    4: { class_type: 'CLIPTextEncode', inputs: { text: 'p', clip: ['2', 0] } },
+    5: { class_type: 'CLIPTextEncode', inputs: { text: 'n', clip: ['2', 0] } },
+    7: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+    8: { class_type: 'VAEEncode', inputs: { pixels: ['7', 0], vae: ['3', 0] } },
+    11: { class_type: 'KSampler', inputs: { model: ['1', 0], positive: ['4', 0], negative: ['5', 0], latent_image: ['8', 0], seed: 1, steps: 20, cfg: 3, sampler_name: 'euler', scheduler: 'normal', denoise: 0.6 } },
+  }
+  const dir = tmpDir('pdrawtest-i2i-')
+  const file = writeWorkflowFile(dir, 'i2i.json', graph)
+  wf.clearWorkflowCache()
+  const report = wf.inspectWorkflowFile(file, {}, { baseDir: dir })
+  assert.strictEqual(report.ok, true, '图生图（无 EmptyLatentImage）应判为可用：' + (report.error || ''))
+  assert.strictEqual(report.needsImage, true)
+})

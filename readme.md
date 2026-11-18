@@ -485,7 +485,11 @@ defaultWorkflowPreset: 基础文生图
 > 2. `ApplyCosmosReferenceLatent` 在 API 格式下的输入名是 `latent`（不是 `ref_latents`）
 > 3. 参考图**必须先缩放到与生成完全相同的尺寸**（用 `ImageScale`），否则报 `Expected size 152 but got size 144`
 > 4. ComfyUI 自带的 `ReferenceLatent`、Advanced-ControlNet 的 `ACN_ReferenceControlNet` 对 Anima **全部静默失效**（像素与无参考图完全一致），不要用
-> 5. 能力边界：服装/发色/细节可改、角色可保留，但**背景场景会大幅沿用参考图**——想换场景用 02 或全新生成
+> 5. 能力边界：服装/发色/细节可改、角色可保留，但**背景场景会大幅沿用参考图**——想换场景用下面的「换背景」
+>
+> **只想换背景？用 `11-bg-swap.json`（不用串联两个工作流）**：
+> 人物分割（`segm/person_yolov8m-seg.pt`）→ 合并蒙版 → 反相得背景蒙版 → 收缩 8px + 羽化 12px → `InpaintModelConditioning` 只重绘背景。
+> 人物像素完全保留，背景按提示词全新生成。串联两个工作流会二次编解码掉画质，且白白多跑一遍。
 
 > `XB_UNetNameBroadcaster`（在 XB_ToolBox 里）依赖极重（easyocr / whisper / diffusers…），**不建议装**。它只是给模型加载节点传一个字符串，删掉该节点、直接在加载节点的下拉框里选模型即可。
 
