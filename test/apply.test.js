@@ -633,3 +633,34 @@ test('presetPrice returns per-preset price and falls back when unset', () => {
   assert.strictEqual(f({ price: 1200 }), 1200)
   assert.strictEqual(f({ price: '800' }), 800)
 })
+
+// ---------------- 分组名与旧扁平键撞名 ----------------
+
+test('a group named workflow is not mistaken for the old flat key', () => {
+  const r = iface.normalizeConfig({
+    connection: { comfyuiBaseUrl: 'http://127.0.0.1:8188' },
+    workflow: {
+      customWorkflowEnabled: true,
+      workflowPresets: { '基础': { path: 'a.json', price: 750 } },
+    },
+  })
+  assert.deepStrictEqual(r.legacy, [], '同名分组不应被当成旧扁平键（会误报警告）')
+  assert.strictEqual(r.config.customWorkflowEnabled, true, '分组内的字段仍要摊平生效')
+  assert.ok(r.config.workflowPresets && r.config.workflowPresets['基础'], '预设字典要保留')
+})
+
+test('genuine flat legacy keys are still reported and still win', () => {
+  const r = iface.normalizeConfig({
+    price: 500,
+    pricing: { price: 999 },   // 分组里的值不该覆盖扁平旧键
+  })
+  assert.deepStrictEqual(r.legacy, ['price'])
+  assert.strictEqual(r.config.price, 500, '扁平旧键优先级更高')
+})
+
+test('the legacy workflow display field no longer collides with the workflow group', () => {
+  const c = require('../index.js').Config({})
+  assert.deepStrictEqual(Object.keys(c.legacy), ['legacyWorkflow'])
+  assert.strictEqual(c.legacy.legacyWorkflow, 'anima_t2i')
+  assert.ok('workflowPresets' in c.workflow, 'workflow 分组仍然正常')
+})

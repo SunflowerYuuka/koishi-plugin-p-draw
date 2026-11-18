@@ -610,3 +610,14 @@ defaultWorkflowPreset: 基础文生图
 - 自定义节点包表补上 `ComfyUI-Cosmos-Reference`（10 的参考图编辑需要）。
 - 新增「各工作流的额外模型」清单：9 个模型文件的目录、大小、用途一次列全。
 - 补充两条易踩的坑：检测器类模型要放两份（Impact Pack 只读安装目录）；`DepthAnythingV2Preprocessor` 不显式指定 `ckpt_name` 会去下 1.3GB 的 Large 版。
+
+### 1.6.10
+
+**修复**
+
+- 配置里存在 `workflow` 分组时会误报「`koishi.yml` 里仍有扁平旧配置键（workflow）」。原因是 `legacy` 分组里的旧字段也叫 `workflow`，和工作流分组撞名，`normalizeConfig` 把它当成了扁平旧键。
+  - 该字段已改名为 `legacyWorkflow`；`normalizeConfig` 也不再同名的对象值当成扁平旧键。
+  - 连带修复：状态 / 诊断里「工作流」一栏原本会显示成 `[object Object]`（`cfg.workflow` 拿到的是分组对象）。
+  - **配置无需改动**：`workflow:` 分组保持原样即可，删掉它等于删掉全部预设。
+
+> 如果你的 `koishi.yml` 里还留着旧的扁平 `workflow: anima_t2i`，可以删掉；它的新名字是 `legacyWorkflow`，且只影响诊断显示。

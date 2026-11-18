@@ -73,7 +73,7 @@ const CONFIG_GROUPS = {
     'verifyLlmBaseUrl', 'verifyLlmApiKey', 'verifyLlmProxy', 'verifyLlmModel', 'verifyLlmModels',
     'verifyLlmChannels', 'verifyLlmChannelOrder',
   ],
-  legacy: ['workflow'],
+  legacy: ['legacyWorkflow'],
 }
 
 // 把嵌套配置摊平成扁平 cfg（就地写入，保持对象引用不变）。
@@ -82,7 +82,14 @@ const CONFIG_GROUPS = {
 function normalizeConfig(raw) {
   const src = raw && typeof raw === 'object' ? raw : {}
   const known = Object.values(CONFIG_GROUPS).flat()
-  const legacy = known.filter(key => Object.prototype.hasOwnProperty.call(src, key))
+  const groupNames = new Set(Object.keys(CONFIG_GROUPS))
+  // 名字同时是分组名时要区分：值是对象就按分组处理。
+  // （历史上 legacy 分组里有个叫 workflow 的旧字段，会和 workflow 分组撞名）
+  const legacy = known.filter((key) => {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) return false
+    if (groupNames.has(key) && src[key] && typeof src[key] === 'object') return false
+    return true
+  })
 
   for (const [group, keys] of Object.entries(CONFIG_GROUPS)) {
     const node = src[group]
@@ -254,7 +261,7 @@ exports.Config = Schema.object({
   }).description('⑩ 多人视觉校验').collapse(),
 
   legacy: Schema.object({
-    workflow: Schema.string().default('anima_t2i').description('旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 anima_t2i'),
+    legacyWorkflow: Schema.string().default('anima_t2i').description('旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 anima_t2i（原键名 workflow 与工作流分组撞名，已改名）'),
   }).description('⑪ 兼容项（旧版，可忽略）').collapse(),
 })
 
@@ -581,7 +588,7 @@ exports.apply = async function apply(ctx, rawConfig) {
     const payload = {
       ok: true,
       base_url: baseUrl(),
-      workflow: cfg.workflow,
+      workflow: cfg.legacyWorkflow,
       allowed_sizes: sizes.map(s => `${s[0]}x${s[1]}`),
       comfyui_api_reachable: false,
     }
@@ -768,7 +775,7 @@ exports.apply = async function apply(ctx, rawConfig) {
     const lines = ['【p-draw 诊断】']
     lines.push(`插件版本：${require('./package.json').version || '未知'}`)
     lines.push(`ComfyUI 地址：${payload.base_url}`)
-    lines.push(`工作流：${cfg.customWorkflowEnabled ? '自定义 ' + (cfg.customWorkflowPath || '(未填写路径)') : (cfg.workflow || 'anima_t2i')}`)
+    lines.push(`工作流：${cfg.customWorkflowEnabled ? '自定义 ' + (cfg.customWorkflowPath || '(未填写路径)') : (cfg.legacyWorkflow || 'anima_t2i')}`)
     if (cfg.customWorkflowEnabled) {
       lines.push(...customWorkflowDiagLines())
     }
