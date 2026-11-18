@@ -193,7 +193,7 @@ exports.Config = Schema.object({
       modelLoaderNodeId: Schema.string().description('该预设的模型加载节点 ID（留空沿用全局）'),
     }).description('预设')).default({}).description('工作流预设：key=预设名。指令里用 `--工作流 <名称>` 或名称/别名开头选择（如 `画图 极速：1girl`）'),
     defaultWorkflowPreset: Schema.string().default('').description('默认预设名（留空则用上面的 customWorkflow* 那套）'),
-  }).description('⑦ 自定义工作流'),
+  }).description('⑦ 自定义工作流').collapse(),
 
   llm: Schema.object({
     promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需配置下面的 LLM 接口）'),
@@ -217,7 +217,7 @@ exports.Config = Schema.object({
     llmExtraBody: Schema.string().role('textarea').default('{}').description('附加请求体 JSON（最后覆盖），用于中转站私有参数，如 {"enable_thinking":false}'),
     llmMaxTokens: Schema.number().default(1000).description('LLM 输出上限'),
     promptOptimizeTemplate: Schema.string().description('优化模板（支持 {theme} {search_block} {character_rule} 占位符）').default('你是为 Anima 图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 除上述明确要求外，可以自由决定服装细节、姿态、构图、镜头、背景、环境、光影、色彩、氛围、前景和特效。\n- 以最终图像协调、精致、有表现力和好看为优先，不需要机械追求固定 Tag 数量。\n- 不要为了数量重复同义词；画面已经完整时即可停止。\n- 请自行解决明显冲突，直接输出你认为最适合生成最终画面的版本。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}'),
-  }).description('⑧ 提示词优化 / LLM'),
+  }).description('⑧ 提示词优化 / LLM').collapse(),
 
   search: Schema.object({
     webSearchEnabled: Schema.boolean().default(false).description('启用联网搜索（指令里写「联网/搜索/查一下」触发）'),
@@ -226,7 +226,7 @@ exports.Config = Schema.object({
     webSearchMaxResults: Schema.number().default(5).description('搜索结果数量'),
     webSearchDepth: Schema.string().default('basic').description('搜索深度（basic / advanced）'),
     webSearchQueryTemplate: Schema.string().default('{prompt} 角色 外观 立绘 服装 配色 武器 官方图 official art character design outfit appearance wiki fandom').description('搜索词模板（{prompt} 代表用户需求）'),
-  }).description('⑨ 联网搜索'),
+  }).description('⑨ 联网搜索').collapse(),
 
   vision: Schema.object({
     multiVerifyEnabled: Schema.boolean().default(true).description('多人图生成后启用视觉校验'),
@@ -245,11 +245,11 @@ exports.Config = Schema.object({
       proxy: Schema.string().description('该通道专用代理（留空则用上面的 verifyLlmProxy）'),
     }).description('通道')).default({}).description('视觉校验的附加通道：主通道全部失败后按顺序继续尝试'),
     verifyLlmChannelOrder: Schema.array(Schema.string()).default([]).description('视觉附加通道的尝试顺序（填通道名；留空则按配置先后顺序）'),
-  }).description('⑩ 多人视觉校验'),
+  }).description('⑩ 多人视觉校验').collapse(),
 
   legacy: Schema.object({
     workflow: Schema.string().default('anima_t2i').description('旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 anima_t2i'),
-  }).description('⑪ 兼容项（旧版，可忽略）'),
+  }).description('⑪ 兼容项（旧版，可忽略）').collapse(),
 })
 
 // ------------------------------------------------------------------
