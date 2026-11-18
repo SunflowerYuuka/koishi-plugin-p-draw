@@ -128,7 +128,7 @@ exports.Config = Schema.object({
       width: Schema.number().description('默认宽度'),
       height: Schema.number().description('默认高度'),
     }).description('该模型的参数覆盖')).default({}).description('按模型覆盖参数：key=模型文件名，value 只填要覆盖的字段。显式写了的字段会覆盖工作流内取值'),
-  }).description('② 模型与采样参数'),
+  }).description('② 模型与采样参数').collapse(),
 
   prompt: Schema.object({
     qualityPrefix: Schema.string().default('').description('质量词前缀（Aesthetic 1.1 建议留空；Base 模型可填 masterpiece, best quality, score_7）'),
@@ -138,13 +138,13 @@ exports.Config = Schema.object({
     activeArtistPreset: Schema.string().default('').description('启用的画师组名称'),
     artistPresets: Schema.array(Schema.string()).default([]).description('画师组（格式：名称=tags）'),
     fixedCharacters: Schema.array(Schema.string()).default([]).description('固定角色（格式：角色名=tags；仅兼容旧配置，运行时以数据库为准）'),
-  }).description('③ 提示词与画师'),
+  }).description('③ 提示词与画师').collapse(),
 
   queue: Schema.object({
     queueEnabled: Schema.boolean().default(true).description('启用生成队列（逐张顺序执行）'),
     queueMaxRequests: Schema.number().default(5).description('队列最大任务数（0 表示不限制）'),
     batchMax: Schema.number().default(4).description('单次指令最多生成的张数'),
-  }).description('④ 队列与批量'),
+  }).description('④ 队列与批量').collapse(),
 
   pricing: Schema.object({
     price: Schema.number().default(500).description('一张图消耗的 P 点'),
@@ -152,7 +152,7 @@ exports.Config = Schema.object({
     couponPrice: Schema.number().default(3000).description('提示词优化券单价（可被 data/p-shop.json 覆盖）'),
     couponAskTimeout: Schema.number().default(60).description('优化券确认等待时间（秒）'),
     adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID'),
-  }).description('⑤ P 点与优化券'),
+  }).description('⑤ P 点与优化券').collapse(),
 
   access: Schema.object({
     adminOnly: Schema.boolean().default(false).description('仅管理员可用'),
@@ -161,7 +161,7 @@ exports.Config = Schema.object({
     allowedGroupIds: Schema.array(Schema.string()).default([]).description('群白名单（留空不限制）'),
     blockedGroupIds: Schema.array(Schema.string()).default([]).description('群黑名单（优先于白名单）'),
     outputLogs: Schema.boolean().default(true).description('输出详细日志'),
-  }).description('⑥ 权限与日志'),
+  }).description('⑥ 权限与日志').collapse(),
 
   workflow: Schema.object({
     customWorkflowEnabled: Schema.boolean().default(false).description('使用自定义 ComfyUI 工作流 JSON'),

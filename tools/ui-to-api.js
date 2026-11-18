@@ -24,19 +24,16 @@ if (!SRC || !OUT) {
   process.exit(1)
 }
 
-const LINK_TYPES = new Set([
-  'MODEL', 'CLIP', 'VAE', 'LATENT', 'IMAGE', 'MASK', 'CONDITIONING', 'CONTROL_NET',
-  'UPSCALE_MODEL', 'CLIP_VISION', 'CLIP_VISION_OUTPUT', 'SIGMAS', 'SAMPLER', 'GUIDER',
-  'NOISE', 'SEGS', 'DETAILER_PIPE', 'BASIC_PIPE', 'PIPE', 'STYLE_MODEL', 'T2I_ADAPTER',
-  'MASK_LIST', 'AUDIO', 'VIDEO', 'IMAGE_LIST', 'WEBCAM',
-])
+// widget 输入 = schema 里声明为标量类型（INT/FLOAT/STRING/BOOLEAN）或 COMBO。
+// 其它一切都是连线型，包括 SAM_MODEL / SCHEDULER_FUNC / DETAILER_PIPE 这类自定义类型。
+// 早期用「链接类型白名单」判断会把未知自定义类型误当成 widget，导致 widgets_values 错位。
+const WIDGET_TYPES = new Set(['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'])
 
 function isWidgetSpec(spec) {
   if (!Array.isArray(spec)) return false
   const head = spec[0]
   if (Array.isArray(head)) return true
-  if (typeof head === 'string' && LINK_TYPES.has(head)) return false
-  return typeof head === 'string'
+  return typeof head === 'string' && WIDGET_TYPES.has(head.toUpperCase())
 }
 
 // 旁路节点可能串联（A 旁路 → B 旁路 → 消费者），要一路追到真正的源头
