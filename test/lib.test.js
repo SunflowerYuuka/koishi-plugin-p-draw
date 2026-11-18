@@ -999,3 +999,24 @@ test('ClownsharKSampler_Beta and other samplers are recognised for prompt/steps/
   assert.deepStrictEqual(targets.seedIds, ['32'])
   assert.deepStrictEqual(wf.findModelLoaders(graph).map(l => l.id), ['1'])
 })
+
+test('outputImages drops temp previews but falls back when there is no saved output', () => {
+  const history = {
+    outputs: {
+      15: { images: [{ filename: 'final_a.png', type: 'output' }] },
+      239: { images: [{ filename: 'final_b.png', type: 'output' }] },
+      19: { images: [{ filename: 'ComfyUI_temp_1.png', type: 'temp' }] },
+      31: { images: [{ filename: 'ComfyUI_temp_2.png', type: 'temp' }] },
+    },
+  }
+  const got = comfy.outputImages(history).map(i => i.filename)
+  assert.deepStrictEqual(got, ['final_a.png', 'final_b.png'], '不应把 PreviewImage 的预览图发给用户')
+
+  // 只有预览节点时（没有 SaveImage）退回取全部，别什么都不给
+  const previewOnly = { outputs: { 19: { images: [{ filename: 'p.png', type: 'temp' }] } } }
+  assert.deepStrictEqual(comfy.outputImages(previewOnly).map(i => i.filename), ['p.png'])
+
+  // type 缺失按成品处理
+  const noType = { outputs: { 9: { images: [{ filename: 'x.png' }] } } }
+  assert.deepStrictEqual(comfy.outputImages(noType).map(i => i.filename), ['x.png'])
+})
