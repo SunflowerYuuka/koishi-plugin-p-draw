@@ -180,7 +180,7 @@ test('fixed characters migrate once into their dedicated table and drive command
   assert.deepStrictEqual(extension.fields, { id: 'unsigned', name: 'string', tags: 'text' })
   const legacyExtension = localCtx.operations.find(operation => operation.type === 'extend' && operation.table === 'p_draw_config')
   assert.strictEqual(legacyExtension.fields.fixed_characters, 'json')
-  assert.ok('fixedCharacters' in plugin.Config({}))
+  assert.ok('fixedCharacters' in plugin.Config({}).prompt)
   assert.deepStrictEqual(localCtx.tables.p_draw_fixed_characters.map(({ name, tags }) => ({ name, tags })), [
     { name: '狐莉', tags: '1girl, fox girl' },
     { name: '小明', tags: '1boy, black hair' },
@@ -570,36 +570,53 @@ test('diagnoseText reports custom workflow node IDs without contacting ComfyUI',
 
 // ---------------- 配置分组（控制台折叠） ----------------
 
-test('config is grouped into collapsible sections while staying flat', () => {
+test('config is grouped into collapsible nested sections', () => {
   const schema = plugin.Config
-
-  // 用 Schema.intersect 做分组
-  assert.strictEqual(schema.type, 'intersect')
-  assert.ok(Array.isArray(schema.list))
-  assert.ok(schema.list.length >= 10, '应该切出足够多的分组')
-
-  // 每个分组都要有标题，否则控制台里认不出来
-  for (const branch of schema.list) {
-    assert.ok(branch.meta.description, '存在没有标题的分组')
-  }
-
-  // 进阶分组默认折叠，常用分组默认展开
-  assert.ok(schema.list.filter(b => b.meta.collapse).length >= 3, '进阶分组应默认折叠')
-  assert.ok(schema.list.some(b => !b.meta.collapse), '常用分组应默认展开')
-
-  // 关键：解析结果必须仍是扁平对象，不能多出「分组」这一层
   const resolved = schema({})
-  for (const key of ['comfyuiBaseUrl', 'unetName', 'cfg', 'qualityPrefix', 'negativePrompt',
-    'customWorkflowEnabled', 'positivePromptNodeId', 'price', 'queueEnabled', 'adminOnly', 'outputLogs']) {
-    assert.ok(key in resolved, '缺少配置项 ' + key)
-  }
-  assert.strictEqual(typeof resolved.cfg, 'number')
-  // 分组标题不应成为配置键
-  assert.ok(!('① ComfyUI 连接' in resolved))
+  const groups = Object.keys(resolved)
 
-  // 旧 koishi.yml 的扁平写法必须继续被接受（零迁移）
-  const oldStyle = schema({ unetName: 'legacy.safetensors', cfg: 4.5, qualityPrefix: 'masterpiece' })
-  assert.strictEqual(oldStyle.unetName, 'legacy.safetensors')
-  assert.strictEqual(oldStyle.cfg, 4.5)
-  assert.strictEqual(oldStyle.qualityPrefix, 'masterpiece')
+  assert.ok(groups.length >= 10, '应该切出足够多的分组')
+  // 每个分组必须是对象：控制台只对嵌套 object 字段渲染折叠箭头（intersect 分支是平铺的）
+  for (const group of groups) {
+    assert.strictEqual(typeof resolved[group], 'object', group + ' 应为分组对象')
+    assert.ok(!Array.isArray(resolved[group]), group + ' 不应是数组')
+    assert.ok(Object.keys(resolved[group]).length > 0, group + ' 不应为空组')
+  }
+
+  // 关键字段各就各位
+  assert.ok('comfyuiBaseUrl' in resolved.connection)
+  assert.ok('unetName' in resolved.model)
+  assert.ok('modelParams' in resolved.model)
+  assert.ok('negativePrompt' in resolved.prompt)
+  assert.ok('batchMax' in resolved.queue)
+  assert.ok('price' in resolved.pricing)
+  assert.ok('adminOnly' in resolved.access)
+  assert.ok('workflowPresets' in resolved.workflow)
+  assert.ok('llmModels' in resolved.llm)
+  assert.ok('tavilyProxy' in resolved.search)
+  assert.ok('verifyLlmModels' in resolved.vision)
+
+  // 不能再有顶层扁平键，否则说明退回 intersect、折叠会失效
+  assert.ok(!('unetName' in resolved), '顶层不应再有扁平键')
+})
+
+test('normalizeConfig flattens groups and lets legacy flat keys win', () => {
+  // 老配置：全扁平 → 就地摊平，引用不变
+  const flat = { unetName: 'legacy.safetensors', cfg: 4.5, qualityPrefix: 'masterpiece' }
+  const r1 = iface.normalizeConfig(flat)
+  assert.strictEqual(r1.config, flat, '应就地摊平并保持对象引用（测试和外部持有的 cfg 才能继续生效）')
+  assert.strictEqual(r1.config.unetName, 'legacy.safetensors')
+  assert.strictEqual(r1.config.cfg, 4.5)
+  assert.deepStrictEqual(r1.legacy.sort(), ['cfg', 'qualityPrefix', 'unetName'])
+
+  // 新配置：分组值摊平到顶层
+  const r2 = iface.normalizeConfig({ model: { unetName: 'new.safetensors', cfg: 3 }, prompt: { qualityPrefix: '' } })
+  assert.strictEqual(r2.config.unetName, 'new.safetensors')
+  assert.strictEqual(r2.config.cfg, 3)
+  assert.deepStrictEqual(r2.legacy, [])
+
+  // 混合：旧扁平键优先，避免已生效的设置被默认值顶掉
+  const r3 = iface.normalizeConfig({ model: { unetName: 'grouped.safetensors' }, unetName: 'flat.safetensors' })
+  assert.strictEqual(r3.config.unetName, 'flat.safetensors')
+  assert.deepStrictEqual(r3.legacy, ['unetName'])
 })

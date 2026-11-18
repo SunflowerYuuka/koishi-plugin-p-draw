@@ -66,7 +66,7 @@ plugins:
 
 ## 配置说明
 
-控制台里配置分成 **12 个可折叠小节**：①–⑥ 常用项默认展开，⑦–⑫ 进阶项默认折叠。`koishi.yml` 里的键仍然是**扁平**的（见文末示例），分组只影响界面显示，旧配置无需迁移。
+控制台里配置分成 **11 个可折叠分组**，点标题即可折叠/展开，默认展开。分组是嵌套结构，`koishi.yml` 里写成 `组名: { 字段名: 值 }`，详见文末的分组对照与示例。
 
 ### ① ComfyUI 连接
 
@@ -175,21 +175,51 @@ plugins:
 |----|------|
 | `workflow` | 旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 `anima_t2i` |
 
-`koishi.yml` 里仍是扁平写法（分组不影响它）：
+控制台里配置分成 **11 个可折叠分组**（每个分组都能折叠/展开，默认展开）。分组是**嵌套结构**：`koishi.yml` 里对应写成 `组名: { 字段名: 值 }`。
+
+已有的**扁平旧配置仍然生效**（插件会就地摊平并打一条日志提醒），但建议迁移成下面的分组写法——否则你在控制台里改同名项不会生效，因为旧扁平键优先级更高。
+
+| 分组 | 内容 |
+|---|---|
+| `connection` | ComfyUI 地址、超时、轮询间隔 |
+| `model` | 模型文件、采样参数、尺寸、`modelParams` |
+| `prompt` | 质量前缀、负面词、画师组、固定角色 |
+| `queue` | 队列与批量张数 |
+| `pricing` | P 点价格、优化券、管理员 |
+| `access` | 白名单/黑名单、日志 |
+| `workflow` | 自定义工作流、节点 ID、工作流预设 |
+| `llm` | 提示词优化、多通道/多模型、LLM 代理 |
+| `search` | 联网搜索（Tavily）与其代理 |
+| `vision` | 多人视觉校验及其通道/代理 |
+| `legacy` | 旧版 `workflow` 标识，可忽略 |
 
 ```yaml
 p-draw:0z81el:
-  comfyuiBaseUrl: http://127.0.0.1:8188
-  unetName: anima-aesthetic-v1.1.safetensors
-  qualityPrefix: ''
-  cfg: 4.0
-  steps: 30
-  # 进阶项同样扁平，例如：
-  # customWorkflowEnabled: true
-  # customWorkflowPath: data/p-draw/workflows/anima-aesthetic-v1.1.json
+  connection:
+    comfyuiBaseUrl: http://127.0.0.1:8188
+  model:
+    unetName: anima-aesthetic-v1.1.safetensors
+    cfg: 4.0
+    steps: 30
+  prompt:
+    qualityPrefix: ''
+  workflow:
+    customWorkflowEnabled: true
+    customWorkflowPath: data/p-draw/workflows/anima-aesthetic-v1.1.json
+    workflowPresets:
+      极速4步:
+        path: data/p-draw/workflows/03-dmdx.json
+        aliases: [极速]
+        steps: 4
+        cfg: 1.0
+  llm:
+    llmBaseUrl: https://api.deepseek.com
+    llmModels: [deepseek-chat]
 ```
 
 ## 中转站、多模型与代理
+
+> 下面片段为便于阅读只按**字段名**展示，实际请写在对应分组下：`llm*` → `llm:`，`tavilyProxy` / `webSearch*` → `search:`，`verifyLlm*` → `vision:`。
 
 ### 多模型逐个回退
 
@@ -353,6 +383,8 @@ p-draw:
 - [ ] `p-draw 诊断` 能显示实际工作流路径、更新时间与实际解析到的节点 ID。
 
 ## 工作流预设
+
+> 下面片段按字段名展示，实际写在 `workflow:` 分组下（见「配置说明」的分组示例）。
 
 Anima Aesthetic 1.1 官方/社区共 10 个工作流。插件**不内置任何 JSON**，你导出后登记成预设，指令里按名字切换。
 

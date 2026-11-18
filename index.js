@@ -34,17 +34,76 @@ exports.usage = `
  `;
 
 const { zhCN } = require('./lib/i18n')
-// 配置分组：用 Schema.intersect 让控制台按「可折叠小节」渲染，
-// 同时解析结果仍是扁平对象 —— 旧的 koishi.yml 键名不变，无需迁移。
-exports.Config = Schema.intersect([
-  // ---------------- 常用（默认展开） ----------------
-  Schema.object({
+// 配置分组定义：组名 → 组内扁平键。
+//
+// 控制台里只有「嵌套 object 字段」才会渲染出折叠箭头（intersect 分支是平铺的），
+// 所以这里用嵌套结构换折叠能力；运行时统一摊平成扁平 cfg，
+// 并兼容老版本写在 koishi.yml 里的扁平键。
+const CONFIG_GROUPS = {
+  connection: ['comfyuiBaseUrl', 'timeout', 'pollInterval'],
+  model: [
+    'unetName', 'useGgufUnet', 'clipName', 'vaeName', 'width', 'height',
+    'allowedSizes', 'steps', 'cfg', 'samplerName', 'scheduler', 'modelParams',
+  ],
+  prompt: [
+    'qualityPrefix', 'negativePrompt', 'styleTags', 'defaultArtistTags',
+    'activeArtistPreset', 'artistPresets', 'fixedCharacters',
+  ],
+  queue: ['queueEnabled', 'queueMaxRequests', 'batchMax'],
+  pricing: ['price', 'multiPrice', 'couponPrice', 'couponAskTimeout', 'adminUsers'],
+  access: ['adminOnly', 'allowedUserIds', 'blockedUserIds', 'allowedGroupIds', 'blockedGroupIds', 'outputLogs'],
+  workflow: [
+    'customWorkflowEnabled', 'customWorkflowPath', 'skipQualityPrefixForCustomWorkflow',
+    'customWorkflowOverrideParameters', 'customWorkflowReloadOnChange',
+    'positivePromptNodeId', 'negativePromptNodeId', 'resolutionNodeId', 'seedNodeId', 'stepsNodeId',
+    'workflowPresets', 'defaultWorkflowPreset',
+  ],
+  llm: [
+    'promptOptimizeEnabled', 'llmBaseUrl', 'llmApiKey', 'llmProxy', 'llmModel', 'llmModels',
+    'llmChannels', 'llmChannelOrder', 'llmThinking', 'llmExtraBody', 'llmMaxTokens',
+    'promptOptimizeTemplate',
+  ],
+  search: [
+    'webSearchEnabled', 'tavilyApiKey', 'tavilyProxy',
+    'webSearchMaxResults', 'webSearchDepth', 'webSearchQueryTemplate',
+  ],
+  vision: [
+    'multiVerifyEnabled', 'multiVerifyPassScore', 'multiCandidateCount', 'multiSendDegradedCandidate',
+    'verifyLlmBaseUrl', 'verifyLlmApiKey', 'verifyLlmProxy', 'verifyLlmModel', 'verifyLlmModels',
+    'verifyLlmChannels', 'verifyLlmChannelOrder',
+  ],
+  legacy: ['workflow'],
+}
+
+// 把嵌套配置摊平成扁平 cfg（就地写入，保持对象引用不变）。
+// 优先级：顶层的旧扁平键 > 分组内的值。这样老 koishi.yml 直接可用，
+// 而迁移到新结构后（顶层不再有同名键）就以分组值为准。
+function normalizeConfig(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {}
+  const known = Object.values(CONFIG_GROUPS).flat()
+  const legacy = known.filter(key => Object.prototype.hasOwnProperty.call(src, key))
+
+  for (const [group, keys] of Object.entries(CONFIG_GROUPS)) {
+    const node = src[group]
+    if (!node || typeof node !== 'object') continue
+    for (const key of keys) {
+      // 顶层扁平旧键优先，不被分组值覆盖
+      if (legacy.includes(key)) continue
+      if (key in node) src[key] = node[key]
+    }
+  }
+  return { config: src, legacy }
+}
+
+// 控制台里每个分组是一个「可折叠小节」：嵌套 object 字段天生带折叠箭头，默认展开。
+exports.Config = Schema.object({
+  connection: Schema.object({
     comfyuiBaseUrl: Schema.string().default('http://127.0.0.1:8188').description('ComfyUI 地址'),
     timeout: Schema.number().default(300).description('单次生成超时（秒）'),
     pollInterval: Schema.number().default(2).description('生成状态查询间隔（秒）'),
   }).description('① ComfyUI 连接'),
 
-  Schema.object({
+  model: Schema.object({
     unetName: Schema.string().default('anima-aesthetic-v1.1.safetensors').description('主模型文件名，需与 ComfyUI models/diffusion_models 下的文件名完全一致；8G 显存可填 .gguf 版（插件自动改用 UnetLoaderGGUF）'),
     useGgufUnet: Schema.union([
       Schema.const('auto').description('按文件名自动判断（.gguf → UnetLoaderGGUF）'),
@@ -60,11 +119,19 @@ exports.Config = Schema.intersect([
     cfg: Schema.number().default(4.0).description('CFG 强度（Aesthetic 1.1 推荐 4，用 3 也常更好）'),
     samplerName: Schema.string().default('er_sde').description('采样器'),
     scheduler: Schema.string().default('simple').description('调度器'),
+    modelParams: Schema.dict(Schema.object({
+      samplerName: Schema.string().description('采样器'),
+      scheduler: Schema.string().description('调度器'),
+      steps: Schema.number().description('采样步数'),
+      cfg: Schema.number().description('CFG 强度'),
+      width: Schema.number().description('默认宽度'),
+      height: Schema.number().description('默认高度'),
+    }).description('该模型的参数覆盖')).default({}).description('按模型覆盖参数：key=模型文件名，value 只填要覆盖的字段。显式写了的字段会覆盖工作流内取值'),
   }).description('② 模型与采样参数'),
 
-  Schema.object({
+  prompt: Schema.object({
     qualityPrefix: Schema.string().default('').description('质量词前缀（Aesthetic 1.1 建议留空；Base 模型可填 masterpiece, best quality, score_7）'),
-    negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词。推荐值就是当前默认值：worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts（Aesthetic 1.1 适用）。若用 Base 模型，可再加 score_4, score_5, score_6；不想要画师署名可保留 artist name'),
+    negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词。推荐值就是当前默认值：worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts（Aesthetic 1.1 适用）。若用 Base 模型，可再加 score_4, score_5, score_6'),
     styleTags: Schema.string().default('').description('画风 tags'),
     defaultArtistTags: Schema.string().default('').description('备用画师 tags'),
     activeArtistPreset: Schema.string().default('').description('启用的画师组名称'),
@@ -72,13 +139,13 @@ exports.Config = Schema.intersect([
     fixedCharacters: Schema.array(Schema.string()).default([]).description('固定角色（格式：角色名=tags；仅兼容旧配置，运行时以数据库为准）'),
   }).description('③ 提示词与画师'),
 
-  Schema.object({
+  queue: Schema.object({
     queueEnabled: Schema.boolean().default(true).description('启用生成队列（逐张顺序执行）'),
     queueMaxRequests: Schema.number().default(5).description('队列最大任务数（0 表示不限制）'),
     batchMax: Schema.number().default(4).description('单次指令最多生成的张数'),
   }).description('④ 队列与批量'),
 
-  Schema.object({
+  pricing: Schema.object({
     price: Schema.number().default(500).description('一张图消耗的 P 点'),
     multiPrice: Schema.number().default(900).description('多人指令单张消耗的 P 点'),
     couponPrice: Schema.number().default(3000).description('提示词优化券单价（可被 data/p-shop.json 覆盖）'),
@@ -86,7 +153,7 @@ exports.Config = Schema.intersect([
     adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID'),
   }).description('⑤ P 点与优化券'),
 
-  Schema.object({
+  access: Schema.object({
     adminOnly: Schema.boolean().default(false).description('仅管理员可用'),
     allowedUserIds: Schema.array(Schema.string()).default([]).description('用户白名单（留空不限制）'),
     blockedUserIds: Schema.array(Schema.string()).default([]).description('用户黑名单（优先于白名单）'),
@@ -95,8 +162,7 @@ exports.Config = Schema.intersect([
     outputLogs: Schema.boolean().default(true).description('输出详细日志'),
   }).description('⑥ 权限与日志'),
 
-  // ---------------- 进阶（默认折叠） ----------------
-  Schema.object({
+  workflow: Schema.object({
     customWorkflowEnabled: Schema.boolean().default(false).description('使用自定义 ComfyUI 工作流 JSON'),
     customWorkflowPath: Schema.string().default('').description('工作流 JSON 路径（相对 Koishi 运行目录，如 data/p-draw/workflows/anima-aesthetic-v1.1.json）'),
     skipQualityPrefixForCustomWorkflow: Schema.boolean().default(true).description('启用自定义工作流时跳过质量前缀注入'),
@@ -104,7 +170,7 @@ exports.Config = Schema.intersect([
     customWorkflowReloadOnChange: Schema.boolean().default(true).description('工作流文件变化时自动重载（无需重启）'),
     positivePromptNodeId: Schema.string().default('').description('正面提示词节点 ID（留空自动识别；示例 6，以实际 JSON 为准）'),
     negativePromptNodeId: Schema.string().default('').description('负面提示词节点 ID（留空自动识别；示例 7）'),
-    resolutionNodeId: Schema.string().default('').description('尺寸节点 ID（EmptyLatentImage，可留空；示例 5）'),
+    resolutionNodeId: Schema.string().default('').description('尺寸节点 ID（留空自动识别）'),
     seedNodeId: Schema.string().default('').description('种子节点 ID（KSampler，可留空；示例 3）'),
     stepsNodeId: Schema.string().default('').description('步数节点 ID（KSampler，可留空；示例 3）'),
     workflowPresets: Schema.dict(Schema.object({
@@ -122,24 +188,13 @@ exports.Config = Schema.intersect([
       overrideParameters: Schema.boolean().description('用上面的参数覆盖工作流内取值'),
     }).description('预设')).default({}).description('工作流预设：key=预设名。指令里用 `--工作流 <名称>` 或名称/别名开头选择（如 `画图 极速：1girl`）'),
     defaultWorkflowPreset: Schema.string().default('').description('默认预设名（留空则用上面的 customWorkflow* 那套）'),
-  }).description('⑦ 自定义工作流').collapse(),
+  }).description('⑦ 自定义工作流'),
 
-  Schema.object({
-    modelParams: Schema.dict(Schema.object({
-      samplerName: Schema.string().description('采样器'),
-      scheduler: Schema.string().description('调度器'),
-      steps: Schema.number().description('采样步数'),
-      cfg: Schema.number().description('CFG 强度'),
-      width: Schema.number().description('默认宽度'),
-      height: Schema.number().description('默认高度'),
-    }).description('该模型的参数覆盖')).default({}).description('按模型覆盖参数：key=模型文件名，value 只填要覆盖的字段。优先级：命令级 --steps/--cfg > 本节 > 全局配置'),
-  }).description('⑧ 模型独立参数覆盖').collapse(),
-
-  Schema.object({
+  llm: Schema.object({
     promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需配置下面的 LLM 接口）'),
     llmBaseUrl: Schema.string().default('').description('LLM 接口地址（OpenAI 兼容，如 https://api.deepseek.com/v1）'),
     llmApiKey: Schema.string().role('secret').default('').description('LLM API Key'),
-    llmProxy: Schema.string().default('').description('仅 LLM 使用代理（留空直连）。格式 http://127.0.0.1:7890 / socks5://127.0.0.1:7891，可省略 http://。通道内单独填了 proxy 则优先用通道的'),
+    llmProxy: Schema.string().default('').description('仅 LLM 使用代理（留空直连）。格式 http://127.0.0.1:7890 / socks5://127.0.0.1:7891，可省略 http://；通道内单独填了 proxy 则优先用通道的'),
     llmModel: Schema.string().default('').description('LLM 模型名（旧版单模型；请在 llmModels 里配置，这里留空即可）'),
     llmModels: Schema.array(Schema.string()).default([]).description('主通道的模型名列表，按顺序逐个尝试（如 ["deepseek-chat","gpt-4o-mini"]）'),
     llmChannels: Schema.dict(Schema.object({
@@ -157,18 +212,18 @@ exports.Config = Schema.intersect([
     llmExtraBody: Schema.string().role('textarea').default('{}').description('附加请求体 JSON（最后覆盖），用于中转站私有参数，如 {"enable_thinking":false}'),
     llmMaxTokens: Schema.number().default(1000).description('LLM 输出上限'),
     promptOptimizeTemplate: Schema.string().description('优化模板（支持 {theme} {search_block} {character_rule} 占位符）').default('你是为 Anima 图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 除上述明确要求外，可以自由决定服装细节、姿态、构图、镜头、背景、环境、光影、色彩、氛围、前景和特效。\n- 以最终图像协调、精致、有表现力和好看为优先，不需要机械追求固定 Tag 数量。\n- 不要为了数量重复同义词；画面已经完整时即可停止。\n- 请自行解决明显冲突，直接输出你认为最适合生成最终画面的版本。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}'),
-  }).description('⑨ 提示词优化 / LLM').collapse(),
+  }).description('⑧ 提示词优化 / LLM'),
 
-  Schema.object({
+  search: Schema.object({
     webSearchEnabled: Schema.boolean().default(false).description('启用联网搜索（指令里写「联网/搜索/查一下」触发）'),
     tavilyApiKey: Schema.string().role('secret').default('').description('Tavily API Key（https://tavily.com）'),
-    tavilyProxy: Schema.string().default('').description('仅联网搜索（Tavily）使用代理（留空直连）。格式 http://127.0.0.1:7890，可省略 http://。与 LLM / 视觉校验的代理互相独立'),
+    tavilyProxy: Schema.string().default('').description('仅联网搜索（Tavily）使用代理（留空直连）。与 LLM / 视觉校验的代理互相独立'),
     webSearchMaxResults: Schema.number().default(5).description('搜索结果数量'),
     webSearchDepth: Schema.string().default('basic').description('搜索深度（basic / advanced）'),
     webSearchQueryTemplate: Schema.string().default('{prompt} 角色 外观 立绘 服装 配色 武器 官方图 official art character design outfit appearance wiki fandom').description('搜索词模板（{prompt} 代表用户需求）'),
-  }).description('⑩ 联网搜索').collapse(),
+  }).description('⑨ 联网搜索'),
 
-  Schema.object({
+  vision: Schema.object({
     multiVerifyEnabled: Schema.boolean().default(true).description('多人图生成后启用视觉校验'),
     multiVerifyPassScore: Schema.number().default(6).description('校验合格分数（0-10）'),
     multiCandidateCount: Schema.number().default(2).description('候选采样数量（最多重试 候选数-1 次）'),
@@ -185,13 +240,11 @@ exports.Config = Schema.intersect([
       proxy: Schema.string().description('该通道专用代理（留空则用上面的 verifyLlmProxy）'),
     }).description('通道')).default({}).description('视觉校验的附加通道：主通道全部失败后按顺序继续尝试'),
     verifyLlmChannelOrder: Schema.array(Schema.string()).default([]).description('视觉附加通道的尝试顺序（填通道名；留空则按配置先后顺序）'),
-  }).description('⑪ 多人视觉校验').collapse(),
+  }).description('⑩ 多人视觉校验'),
 
-  Schema.object({
+  legacy: Schema.object({
     workflow: Schema.string().default('anima_t2i').description('旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 anima_t2i'),
-  }).description('⑫ 兼容项（旧版，可忽略）').collapse(),
-]).i18n({
-  'zh-CN': zhCN,
+  }).description('⑪ 兼容项（旧版，可忽略）'),
 })
 
 // ------------------------------------------------------------------
@@ -217,20 +270,25 @@ const {
 const { buildComfyClient } = require('./lib/http')
 const { createOutboundFetch, normalizeProxyUrl, proxySupportAvailable } = require('./lib/net')
 const { buildLlmChain, hasLlm, buildChatBody, runLlmChain } = require('./lib/llm')
-exports.apply = async function apply(ctx, cfg) {
-  // 注意：不在此处 extend p_system 表 —— 该表由 p-qiandao 等 p 系插件创建。
-  // 重复声明同一张表可能导致 Koishi 的 schema 迁移冲突，拖垮签到插件。
+exports.apply = async function apply(ctx, rawConfig) {
+  // 配置统一摊平成扁平 cfg：同时接受新的分组写法和老版本的扁平写法
+  const { config: cfg, legacy } = normalizeConfig(rawConfig)
 
   const logger = ctx.logger('p-draw')
   ctx.i18n.define('zh-CN', zhCN)
+  if (legacy.length) {
+    logger.warn(`[p-draw] koishi.yml 里仍有扁平旧配置键（${legacy.slice(0, 6).join('、')}${legacy.length > 6 ? ' 等' : ''}），本次已按它们生效；建议迁移到分组结构后删掉旧键，否则控制台里改同名项不会生效。`)
+  }
 
   // 出站请求：代理按用途各自传入（联网搜索 / 文本 LLM / 视觉校验互不影响）
   const outboundFetch = createOutboundFetch({
     onWarn: (message) => logger.warn(message),
   })
 
-  // 运行时数据持久化到数据库，而不是调用 scope.update
-  // 写 koishi.yml：scope.update 会触发插件重载，导致正在生成的图被 dispose（Context has
+  // 注意：不在此处 extend p_system 表 —— 该表由 p-qiandao 等 p 系插件创建。
+  // 重复声明同一张表可能导致 Koishi 的 schema 迁移冲突，拖垮签到插件。
+
+  // 运行时数据持久化到数据库，而不是调用 scope.update  // 写 koishi.yml：scope.update 会触发插件重载，导致正在生成的图被 dispose（Context has
   // been disposed），且重复写入时配置文件会被冲掉（曾出现配置整体恢复成默认）。
   try {
     ctx.model.extend('p_draw_config', {
@@ -2493,5 +2551,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir, normalizeConfig, presetList, presetOverviewText }
 }
