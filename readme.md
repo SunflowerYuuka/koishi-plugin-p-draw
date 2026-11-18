@@ -307,6 +307,26 @@ llmChannels:
 | `qwen_3_06b_base.safetensors` | `ComfyUI/models/text_encoders/` | 文本编码器，与 Base 模型共用 |
 | `qwen_image_vae.safetensors` | `ComfyUI/models/vae/` | VAE，与 Base 模型共用 |
 
+#### 各工作流的额外模型
+
+除了上面三个核心文件，下面这些按需下载（不用的工作流可以不装）：
+
+| 文件 | 目标目录 | 大小 | 用于 |
+|---|---|---|---|
+| `4x_NMKD-Siax_200k.pth` | `models/upscale_models/` | 63.9MB | 05 分块放大 |
+| `face_yolov8n.pt` / `hand_yolov8s.pt` | `models/ultralytics/bbox/` | 5.9 / 21.5MB | 08、06 修脸修手 |
+| `PitHandDetailer-v2-Test-v9c.pt` | `models/ultralytics/segm/` | 53.6MB | 08、06 手部精细分割 |
+| `sam_vit_b_01ec64.pth` | `models/sams/` | 357.7MB | 08、06 的 SAM 分割 |
+| `person_yolov8m-seg.pt` | `models/ultralytics/segm/` | 52.3MB | 11、12 人物抠图 |
+| `anima-vace-depth.safetensors` | `models/controlnet/` | 568.3MB | 02 VACE 深度控制 |
+| `anima-lllite-depth-1.safetensors` | `models/model_patches/` + `models/controlnet/` | 7.5MB | 02 的 LLLite 备选方案 |
+| `AnimaEditV1.safetensors` | `models/loras/` | 210.1MB | 10 参考图编辑（**必需**） |
+| `dmdx_student_final_comfy.safetensors` | `models/loras/` | 138.2MB | 03 DMDX 四步极速 |
+
+> **检测器类模型要放两份**：Impact Pack 只读 ComfyUI 安装目录下的 `models/ultralytics/{bbox,segm}`，而 `/models` 接口看到的是共享目录。两份都放最省事。
+>
+> `DepthAnythingV2Preprocessor` 的 `ckpt_name` 是可选输入，**不显式指定就会去下 1.3GB 的 Large 版**（而且那个下载是同步阻塞的，连 interrupt 都杀不掉）。工作流里已经写死 `depth_anything_v2_vits.pth`（94.6MB），模型放 `custom_nodes/comfyui_controlnet_aux/ckpts/depth-anything/Depth-Anything-V2-Small/`。
+
 **8G 显存（如 4060）推荐 GGUF Q8_0**：需要先安装 [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) 插件。插件按 `unetName` 后缀自动选择加载器——`.gguf` 用 `UnetLoaderGGUF`，其余用 `UNETLoader`；也可用 `useGgufUnet` 强制指定。
 
 推荐参数：
@@ -468,7 +488,7 @@ defaultWorkflowPreset: 基础文生图
 
 选了不可用的预设会**直接拒绝并说明原因**，不会静默失败或跑错工作流。
 
-### 10 个工作流的可用性对照
+### 12 个工作流的可用性对照
 
 | # | 工作流 | 节点 | 起点 | 当前版本 |
 |---|---|---|---|---|
@@ -482,6 +502,8 @@ defaultWorkflowPreset: 基础文生图
 | 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ✅ 可用（已裁成单输出；WD14 打标器已剔除，重绘幅度建议 0.4–0.6） |
 | 07 | Image-to-Image | 19 | 图片 | ✅ 可用（已裁成单输出；`Qwen3VLProcessor` 已剔除，需配 `denoise`） |
 | 10 | Anima-Edit LoRA / IC | 52 | 图片 | ✅ 可用（**参考图编辑**：改服装/细节、保角色；背景基本沿用原图） |
+| 11 | 换背景（自建） | 16 | 图片 | ✅ 可用（蒙版重绘：保留构图与主体，只重绘背景） |
+| 12 | 换新场景（自建） | 23 | 图片 | ✅ 可用（抠主体 + 新场景生成 + 合成融合，构图也可换） |
 
 判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。
 
@@ -496,6 +518,7 @@ defaultWorkflowPreset: 基础文生图
 | [ControlAltAI-Nodes](https://github.com/gseth/ControlAltAI-Nodes) | `FluxResolutionNode` | 按兆像素/比例计算尺寸 |
 | [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) | `Seed (rgthree)` | 08 等图的种子节点 |
 | [ComfyUI-Advanced-ControlNet-Anima](https://github.com/TaihoC/ComfyUI-Advanced-ControlNet-Anima)（`feat/anima-vace-controlnet` 分支） | `ACN_ControlNetLoaderAdvanced` / `ACN_AdvancedControlNetApply` | 02 的 VACE 深度控制 |
+| [ComfyUI-Cosmos-Reference](https://github.com/Mirumo0u0/ComfyUI-Cosmos-Reference) | `ApplyCosmosReferenceLatent` | 10 的参考图编辑 |
 
 > **02 的 VACE 深度控制要点**（实测得出，容易踩坑）：
 > 1. 权重：`TaihoC/Anima-ControlNet-VACE-Depth` 的 `anima-vace-depth.safetensors`（568MB）放 `models/controlnet`
