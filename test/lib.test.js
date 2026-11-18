@@ -12,6 +12,7 @@ const comfy = require('../lib/comfy')
 const multi = require('../lib/multi')
 const llm = require('../lib/llm')
 const net = require('../lib/net')
+const image = require('../lib/image')
 
 // 统一的测试临时目录：进程退出时自动清理，避免在系统临时目录留下垃圾
 const tempDirs = []
@@ -898,9 +899,10 @@ test('inspectWorkflowFile reports availability without throwing', () => {
   assert.strictEqual(okReport.ok, true)
   assert.deepStrictEqual(okReport.targets.positive, ['6'])
 
+  // 需要图片输入不再算「不可用」：只要带参考图就能跑
   const badReport = wf.inspectWorkflowFile(bad, {}, { baseDir: dir })
-  assert.strictEqual(badReport.ok, false)
-  assert.ok(badReport.error.includes('不支持图生图'))
+  assert.strictEqual(badReport.ok, true, '需要图片输入的工作流应判为可用')
+  assert.strictEqual(badReport.needsImage, true, '应标记出需要图片')
 
   const missing = wf.inspectWorkflowFile('nope.json', {}, { baseDir: dir })
   assert.strictEqual(missing.ok, false)
@@ -1019,4 +1021,116 @@ test('outputImages drops temp previews but falls back when there is no saved out
   // type 缺失按成品处理
   const noType = { outputs: { 9: { images: [{ filename: 'x.png' }] } } }
   assert.deepStrictEqual(comfy.outputImages(noType).map(i => i.filename), ['x.png'])
+})
+
+// ---------------- 图生图：图片注入 / 重绘幅度 / 上传 ----------------
+
+test('parseStepsCfg extracts --denoise / --重绘 and strips it', () => {
+  const r1 = parse.parseStepsCfg('1girl, solo --denoise 0.6')
+  assert.strictEqual(r1.denoise, 0.6)
+  assert.strictEqual(r1.prompt, '1girl, solo')
+
+  assert.strictEqual(parse.parseStepsCfg('1girl --重绘 0.45').denoise, 0.45)
+  assert.strictEqual(parse.parseStepsCfg('1girl --重绘幅度 2').denoise, 1, '超过 1 应截断')
+  assert.strictEqual(parse.parseStepsCfg('1girl').denoise, null)
+
+  // 和 steps/cfg 混用
+  const r2 = parse.parseStepsCfg('少女 --denoise 0.5 --steps 20')
+  assert.strictEqual(r2.denoise, 0.5)
+  assert.strictEqual(r2.steps, 20)
+  assert.strictEqual(r2.prompt, '少女')
+})
+
+test('image inputs are injected into LoadImage nodes', () => {
+  const graph = {
+    1: { class_type: 'LoadImage', inputs: { image: 'placeholder.png' } },
+    2: { class_type: 'VAEEncode', inputs: { pixels: ['1', 0], vae: ['3', 0] } },
+    3: { class_type: 'VAELoader', inputs: { vae_name: 'v.safetensors' } },
+  }
+  assert.deepStrictEqual(wf.findImageLoaderNodes(graph).map(l => l.id), ['1'])
+  assert.strictEqual(wf.applyImageInputs(graph, ['pdraw/ref.png']).applied, true)
+  assert.strictEqual(graph[1].inputs.image, 'pdraw/ref.png')
+
+  // 没给图 → missing-image
+  const g2 = { 1: { class_type: 'LoadImage', inputs: { image: 'x.png' } } }
+  assert.strictEqual(wf.applyImageInputs(g2, []).reason, 'missing-image')
+
+  // 不需要图的工作流 → not-needed
+  assert.strictEqual(wf.applyImageInputs(baselineGraph(), ['a.png']).reason, 'no-loader')
+
+  // 多个 LoadImage 按顺序分配
+  const g3 = {
+    1: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+    2: { class_type: 'LoadImage', inputs: { image: 'b.png' } },
+  }
+  wf.applyImageInputs(g3, ['p1.png', 'p2.png'])
+  assert.strictEqual(g3[1].inputs.image, 'p1.png')
+  assert.strictEqual(g3[2].inputs.image, 'p2.png')
+
+  // 指定 imageNodeId 只改一个
+  const g4 = {
+    1: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+    2: { class_type: 'LoadImage', inputs: { image: 'b.png' } },
+  }
+  wf.applyImageInputs(g4, ['only.png'], { imageNodeId: '2' })
+  assert.strictEqual(g4[1].inputs.image, 'a.png')
+  assert.strictEqual(g4[2].inputs.image, 'only.png')
+})
+
+test('applyDenoise only touches sampler nodes and only when asked', () => {
+  const graph = {
+    1: { class_type: 'KSampler', inputs: { denoise: 1, steps: 30 } },
+    2: { class_type: 'ClownsharKSampler_Beta', inputs: { denoise: 0.35 } },
+    3: { class_type: 'VAEEncode', inputs: { denoise: 1 } },
+  }
+  assert.deepStrictEqual(wf.applyDenoise(graph, undefined), { applied: false, count: 0 })
+  const r = wf.applyDenoise(graph, 0.6)
+  assert.strictEqual(r.count, 2)
+  assert.strictEqual(graph[1].inputs.denoise, 0.6)
+  assert.strictEqual(graph[2].inputs.denoise, 0.6)
+  assert.strictEqual(graph[3].inputs.denoise, 1, '非采样器节点不该被改')
+})
+
+test('image loader rejects a workflow that needs an image but got none', () => {
+  const graph = {
+    1: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+    2: { class_type: 'KSampler', inputs: { model: ['9', 0], positive: ['5', 0], negative: ['6', 0], latent_image: ['1', 0], seed: 1, steps: 20, cfg: 7, sampler_name: 'euler', scheduler: 'normal', denoise: 0.7 } },
+    5: { class_type: 'CLIPTextEncode', inputs: { text: 'p', clip: ['3', 0] } },
+    6: { class_type: 'CLIPTextEncode', inputs: { text: 'n', clip: ['3', 0] } },
+    7: { class_type: 'EmptyLatentImage', inputs: { width: 64, height: 64, batch_size: 1 } },
+    9: { class_type: 'UNETLoader', inputs: { unet_name: 'm.safetensors' } },
+  }
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'i2i.json', graph)
+  wf.clearWorkflowCache()
+  const base = baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file, unetName: 'm.safetensors' })
+  assert.throws(() => wf.customWorkflow(base, 'P', 'N', 64, 64, 20, 7, 1, false, {}), /需要图片输入/)
+
+  // 给了图就能过，并且 denoise 被写入
+  wf.clearWorkflowCache()
+  const w = wf.customWorkflow(base, 'P', 'N', 64, 64, 20, 7, 1, false, { images: ['pdraw/ref.png'], denoise: 0.55 })
+  assert.strictEqual(w['1'].inputs.image, 'pdraw/ref.png')
+  assert.strictEqual(w['2'].inputs.denoise, 0.55)
+})
+
+test('buildMultipart builds a usable multipart body', () => {
+  const { body, contentType } = image.buildMultipart(
+    { type: 'input', overwrite: 'true' },
+    { buffer: Buffer.from('ABC'), filename: 'a.png', contentType: 'image/png' },
+  )
+  assert.ok(contentType.startsWith('multipart/form-data; boundary='))
+  const text = body.toString('utf8')
+  assert.ok(text.includes('name="type"'))
+  assert.ok(text.includes('filename="a.png"'))
+  assert.ok(text.includes('ABC'))
+})
+
+test('decodeDataUrl and guessContentType', () => {
+  const d = image.decodeDataUrl('data:image/png;base64,' + Buffer.from('hi').toString('base64'))
+  assert.strictEqual(d.contentType, 'image/png')
+  assert.strictEqual(d.buffer.toString(), 'hi')
+  assert.strictEqual(image.decodeDataUrl('http://x/a.png'), null)
+  assert.strictEqual(image.guessContentType('a.JPEG'), 'image/jpeg')
+  assert.strictEqual(image.guessContentType('a.webp'), 'image/webp')
+  assert.strictEqual(image.guessContentType('noext'), 'image/png')
 })

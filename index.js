@@ -189,6 +189,8 @@ exports.Config = Schema.object({
       samplerName: Schema.string().description('该预设固定采样器'),
       scheduler: Schema.string().description('该预设固定调度器'),
       overrideParameters: Schema.boolean().description('用上面的参数覆盖工作流内取值'),
+      denoise: Schema.number().description('图生图的重绘幅度 0–1（1=整张重绘）。只对需要图片输入的工作流有意义'),
+      imageNodeId: Schema.string().description('图片输入节点 ID（LoadImage）。留空则自动使用工作流里的图片节点'),
       price: Schema.number().description('该预设每张消耗的 P 点（留空沿用全局 price / multiPrice）'),
       overrideModel: Schema.boolean().description('是否把 unetName 写进这个工作流的模型节点（留空沿用全局）'),
       modelLoaderNodeId: Schema.string().description('该预设的模型加载节点 ID（留空沿用全局）'),
@@ -273,9 +275,11 @@ const {
   MULTI_PERSON_NEGATIVE_TAGS, buildMultiPersonPlanPrompt, parseMultiPersonPlan,
   renderMultiPersonCharacter, multiPersonAutoSize,
 } = require('./lib/multi')
+const { fileURLToPath } = require('url')
 const { buildComfyClient } = require('./lib/http')
 const { createOutboundFetch, normalizeProxyUrl, proxySupportAvailable } = require('./lib/net')
 const { buildLlmChain, hasLlm, buildChatBody, runLlmChain } = require('./lib/llm')
+const { uploadImageToComfy, decodeDataUrl, guessContentType } = require('./lib/image')
 exports.apply = async function apply(ctx, rawConfig) {
   // 配置统一摊平成扁平 cfg：同时接受新的分组写法和老版本的扁平写法
   const { config: cfg, legacy } = normalizeConfig(rawConfig)
@@ -423,8 +427,7 @@ exports.apply = async function apply(ctx, rawConfig) {
   }
 
   // 体检：这个预设现在能不能真的跑（能否从纯文本启动）
-  function inspectPreset(preset) {
-    return inspectWorkflowFile(preset.path, {
+  function inspectPreset(preset) {    return inspectWorkflowFile(preset.path, {
       positivePromptNodeId: preset.positivePromptNodeId || '',
       negativePromptNodeId: preset.negativePromptNodeId || '',
       resolutionNodeId: preset.resolutionNodeId || '',
@@ -442,6 +445,81 @@ exports.apply = async function apply(ctx, rawConfig) {
     const report = inspectPreset(preset)
     if (!report.ok) return { ok: false, message: `预设「${name}」当前不可用：${report.error}` }
     return { ok: true, preset }
+  }
+
+  // ---------------- 图生图：从消息取图 → 下载 → 上传到 ComfyUI ----------------
+
+  // 消息里带的图片地址（http / file / base64 / data: 都可能有）
+  function messageImageSources(session) {
+    const sources = []
+    try {
+      const message = session?.event?.message
+      if (!message) return sources
+      for (const element of h.select(message, 'img')) {
+        const src = element?.attrs?.src || element?.attrs?.url
+        if (src) sources.push(String(src))
+      }
+    } catch (e) { /* ignore */ }
+    return sources
+  }
+
+  async function fetchImageBuffer(src) {
+    const text = String(src || '')
+    const dataUrl = decodeDataUrl(text)
+    if (dataUrl) return dataUrl
+    if (/^base64:\/\//i.test(text)) {
+      const decoded = decodeDataUrl('data:image/png;base64,' + text.slice('base64://'.length))
+      if (decoded) return decoded
+      throw new Error('base64 图片解码失败')
+    }
+    if (/^file:\/\//i.test(text)) {
+      const filePath = fileURLToPath(text)
+      return { buffer: await fsp.readFile(filePath), contentType: guessContentType(filePath) }
+    }
+    if (/^https?:\/\//i.test(text)) {
+      const res = await outboundFetch(text, {})
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const buffer = Buffer.from(await res.arrayBuffer())
+      const headerType = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-type') : ''
+      return { buffer, contentType: headerType || guessContentType(text) }
+    }
+    throw new Error('不支持的图片来源')
+  }
+
+  // 判断当前要用的工作流是否吃图片，并把消息里的图准备好
+  async function prepareImageInputs(session, preset) {
+    let needsImage = false
+    try {
+      if (preset) {
+        needsImage = Boolean(inspectPreset(preset)?.analysis?.imageInputClasses?.length)
+      } else if (cfg.customWorkflowEnabled && cfg.customWorkflowPath) {
+        const report = inspectWorkflowFile(cfg.customWorkflowPath, cfg, workflowOpts())
+        needsImage = Boolean(report?.analysis?.imageInputClasses?.length)
+      }
+    } catch (e) { /* 读不到就当不需要 */ }
+
+    if (!needsImage) return { ok: true, files: [], needsImage: false }
+
+    const sources = messageImageSources(session)
+    if (!sources.length) {
+      return {
+        ok: false,
+        needsImage: true,
+        message: '这个工作流需要图片输入：请把参考图和指令一起发送（例如：发一张图 + 「画图 重绘：保持角色，换成水彩风格」）。',
+      }
+    }
+
+    const files = []
+    for (const src of sources) {
+      try {
+        const { buffer, contentType } = await fetchImageBuffer(src)
+        files.push(await uploadImageToComfy(outboundFetch, baseUrl(), { buffer, contentType }))
+      } catch (e) {
+        return { ok: false, needsImage: true, message: `图片处理失败：${e.message}` }
+      }
+    }
+    if (cfg.outputLogs) logger.info(`[p-draw] 已上传 ${files.length} 张参考图：${files.join(', ')}`)
+    return { ok: true, files, needsImage: true }
   }
 
   // A4：自定义工作流（Aesthetic 1.1）默认跳过质量前缀注入
@@ -653,7 +731,8 @@ exports.apply = async function apply(ctx, rawConfig) {
       const aliases = (preset.aliases || []).length ? `（别名：${preset.aliases.join('、')}）` : ''
       const unit = presetPrice(preset)
       const priceTag = unit != null ? `  ${unit} P/张` : '  默认价'
-      lines.push(`${report.ok ? '✅' : '❌'} ${preset.name}${aliases}${priceTag}`)
+      const imageTag = report.needsImage ? '  🖼 需带参考图' : ''
+      lines.push(`${report.ok ? '✅' : '❌'} ${preset.name}${aliases}${imageTag}${priceTag}`)
       if (report.ok) {
         const analysis = report.analysis
         const pos = report.targets.positive.map(id => `#${id}`).join('、')
@@ -1005,6 +1084,10 @@ exports.apply = async function apply(ctx, rawConfig) {
       modelParams: overrideKeys,
       overrideModel: baseCfg.workflowOverrideModel !== false,
       modelLoaderNodeId: baseCfg.modelLoaderNodeId || '',
+      images: overrides.images || [],
+      denoise: overrides.denoise != null ? overrides.denoise
+        : (preset && preset.denoise != null && preset.denoise !== '' ? Number(preset.denoise) : undefined),
+      imageNodeId: (preset && preset.imageNodeId) || '',
     }))
 
     const clientId = crypto.randomUUID()
@@ -2246,10 +2329,16 @@ exports.apply = async function apply(ctx, rawConfig) {
     // 预设可单独定价，未配置则用全局 price
     const unitPrice = presetPrice(activePreset) ?? Math.max(0, Number(cfg.price) || 0)
     // 命令级参数优先于预设 / modelParams / 全局配置（见 runComfyGenerate）
+    // 图生图：工作流吃图时先把消息里的图下好、传到 ComfyUI；没带图就直接拦下（不扣点）
+    const imagePlan = await prepareImageInputs(session, activePreset)
+    if (!imagePlan.ok) return imagePlan.message
+
     const tuningOverrides = Object.assign(
       activePreset ? { preset: activePreset } : {},
       parsedTuning.steps != null ? { steps: parsedTuning.steps } : {},
       parsedTuning.cfg != null ? { cfg: parsedTuning.cfg } : {},
+      parsedTuning.denoise != null ? { denoise: parsedTuning.denoise } : {},
+      imagePlan.files.length ? { images: imagePlan.files } : {},
     )
     if (cfg.outputLogs && (parsedTuning.steps != null || parsedTuning.cfg != null)) {
       logger.info(`[p-draw] 命令级参数覆盖：steps=${parsedTuning.steps ?? '-'} cfg=${parsedTuning.cfg ?? '-'}`)

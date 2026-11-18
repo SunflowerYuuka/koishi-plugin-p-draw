@@ -432,7 +432,7 @@ test('end-to-end: --工作流 picks the preset JSON, and image-input presets are
     // 2) 需要图片输入的预设：直接拒绝并说明原因，不得提交到 ComfyUI
     state.captured = null
     const reply = await actions[0]({ session }, '--工作流 图生图：1girl')
-    assert.ok(String(reply).includes('不支持图生图'), '应明确提示需要图生图能力，实得：' + reply)
+    assert.ok(String(reply).includes('需要图片输入'), '应明确提示需要参考图，实得：' + reply)
     assert.strictEqual(state.captured, null, '不可用的预设不应提交到 ComfyUI')
 
     // 3) 别名开头同样生效
@@ -489,6 +489,56 @@ test('end-to-end: a preset charges its own price instead of the global one', asy
     assert.ok(user, '应能找到用户余额记录')
     assert.strictEqual(user.p, 2500, `应按预设价 2500 扣费，实得扣后余额 ${user.p}`)
     assert.ok(state.captured, '应已提交到 ComfyUI')
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})
+
+test('end-to-end: an image-input preset refuses politely when no image is attached', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+
+  const { state, server } = startStubComfy()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  try {
+    const baseDir = tmpDir('pdrawtest-i2i-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    // 构造一个需要图片输入的工作流
+    const i2i = aestheticGraph()
+    i2i['50'] = { class_type: 'LoadImage', inputs: { image: 'placeholder.png' } }
+    i2i['51'] = { class_type: 'VAEEncode', inputs: { pixels: ['50', 0], vae: ['15', 0] } }
+    i2i['7'].inputs.latent_image = ['51', 0]
+    fs.writeFileSync(path.join(wfDir, 'preset-i2i.json'), JSON.stringify(i2i))
+
+    const { ctx, actions } = makeCtx(baseDir, { p_system: [{ userid: '40001', p: 5000 }] })
+    const plugin = require('../index.js')
+    const config = Object.assign(makeCfg(port), {
+      adminUsers: [],
+      workflowPresets: {
+        重绘: { path: 'data/p-draw/workflows/preset-i2i.json', aliases: ['i2i'], price: 900 },
+      },
+    })
+    await plugin.apply(ctx, config)
+
+    const session = {
+      userId: '40001',
+      platform: 'onebot',
+      messageId: 'm6',
+      event: { message: { id: 'm6' } },   // 没有图片元素
+      text: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''),
+      send: async () => {},
+    }
+
+    const reply = await actions[0]({ session }, 'i2i：1girl, solo')
+    assert.ok(String(reply).includes('需要图片输入'), '应提示需要参考图，实得：' + reply)
+    assert.strictEqual(state.captured, null, '不应提交到 ComfyUI')
+
+    const user = ctx.tables.p_system.find(u => u.userid === '40001')
+    assert.strictEqual(user.p, 5000, '没有真正生成时不应扣点')
   } finally {
     server.close()
     if (savedWebSocket) globalThis.WebSocket = savedWebSocket
