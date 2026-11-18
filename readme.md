@@ -439,8 +439,8 @@ defaultWorkflowPreset: 基础文生图
 ```
 ✅ 基础文生图（别名：基础、base）
     节点 9 个 · 正面 #6 · 负面 #7 · 尺寸 #5
-❌ 图生图（别名：i2i）
-    不可用：需要图片输入（LoadImage），当前版本不支持图生图
+✅ 图生图（别名：i2i）  🖼 需带参考图  1000 P/张
+    节点 11 个 · 正面 #4 · 负面 #5 · 尺寸 #6
 ```
 
 选了不可用的预设会**直接拒绝并说明原因**，不会静默失败或跑错工作流。
@@ -458,7 +458,7 @@ defaultWorkflowPreset: 基础文生图
 | 02 | ControlNet Precision Control | 32 | 图片 | ✅ 可用（**VACE 深度控制**，需带参考图；依赖见下） |
 | 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ✅ 可用（已裁成单输出；WD14 打标器已剔除，重绘幅度建议 0.4–0.6） |
 | 07 | Image-to-Image | 19 | 图片 | ✅ 可用（已裁成单输出；`Qwen3VLProcessor` 已剔除，需配 `denoise`） |
-| 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 需图生图 |
+| 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 缺 8 个 AILab 系节点（Cosmos-Reference / RMBG / JPS 等） |
 
 判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。
 
@@ -484,7 +484,7 @@ defaultWorkflowPreset: 基础文生图
 
 01 实测流程：装上 RES4LYF + Comfy-WaveSpeed + ControlAltAI-Nodes，删掉 `XB_UNetNameBroadcaster`，把模型选成自己的，导出 API 即可。**插件会自动把 `unetName` 注入模型节点**（见 `workflowOverrideModel`），所以后续换模型不用再改 JSON。
 
-图生图能力（图片上传 + `LoadImage` 注入 + 重绘幅度）尚未实现，所以 ❌ 的四个目前只能等后续版本。
+图生图能力（图片上传 + `LoadImage` 注入 + 重绘幅度）已实现，所以上面 9 个都能用；只剩 10 还缺外部节点包。
 
 ## 注意
 
