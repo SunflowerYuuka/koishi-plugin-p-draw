@@ -431,9 +431,9 @@ defaultWorkflowPreset: 基础文生图
 
 | # | 工作流 | 节点 | 起点 | 当前版本 |
 |---|---|---|---|---|
-| 09 | Text-to-Image Baseline | 17 | 文本 | ✅ 可用 |
-| 03 | DMDX 4-Step Speed Run | 19 | 文本 | ✅ 可用（设 `steps: 4`、低 CFG） |
-| 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（多段采样+放大） |
+| 09 | Text-to-Image Baseline | 17 | 文本 | ✅ 可用（已转好并实测） |
+| 03 | DMDX 4-Step Speed Run | 19 | 文本 | ⏳ 需 DMDX LoRA（`dmdx_student_final_comfy.safetensors`） |
+| 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（已转好并实测） |
 | 01 | 1.5x Upscale | 20 | 文本 | ✅ 可用（见下方依赖） |
 | 05 | Tiled Upscale | 45 | 视导出而定 | ⚠️ 同上 |
 | 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ✅ 可用（已裁成单输出；ControlNet 分支默认旁路，需检测器 + SAM 模型） |
