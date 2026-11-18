@@ -355,3 +355,73 @@ test('end-to-end: failed LLM model falls through to the next one in the same cha
     if (savedWebSocket) globalThis.WebSocket = savedWebSocket
   }
 })
+
+test('end-to-end: --工作流 picks the preset JSON, and image-input presets are refused clearly', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+
+  const { state, server } = startStubComfy()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  try {
+    const baseDir = tmpDir('pdrawtest-preset-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    fs.writeFileSync(path.join(wfDir, 'preset-basic.json'), JSON.stringify(aestheticGraph()))
+    // 需要图片输入的工作流：插件当前不支持，必须给出明确提示而不是静默失败
+    const i2iGraph = aestheticGraph()
+    i2iGraph['50'] = { class_type: 'LoadImage', inputs: { image: 'placeholder.png' } }
+    fs.writeFileSync(path.join(wfDir, 'preset-i2i.json'), JSON.stringify(i2iGraph))
+
+    const { ctx, actions } = makeCtx(baseDir)
+    const plugin = require('../index.js')
+    const config = Object.assign(makeCfg(port), {
+      workflowPresets: {
+        基础: {
+          path: 'data/p-draw/workflows/preset-basic.json',
+          aliases: ['base'],
+          steps: 7,
+          cfg: 1.5,
+          overrideParameters: true,
+        },
+        图生图: {
+          path: 'data/p-draw/workflows/preset-i2i.json',
+          aliases: ['i2i'],
+        },
+      },
+    })
+    await plugin.apply(ctx, config)
+
+    const sent = []
+    const session = {
+      userId: '10001',
+      platform: 'onebot',
+      messageId: 'm4',
+      event: { message: { id: 'm4' } },
+      text: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''),
+      send: async (content) => { sent.push(content) },
+    }
+
+    // 1) 可用预设：应切换到该 JSON，并应用预设里写死的 steps/cfg
+    await actions[0]({ session }, '--工作流 基础：1girl, solo')
+    const posted = state.captured && state.captured.prompt
+    assert.ok(posted, '应向 ComfyUI 提交')
+    assert.strictEqual(posted['4'].inputs.text, '1girl, solo')
+    assert.strictEqual(posted['7'].inputs.steps, 7, '预设的 steps 应覆盖全局配置')
+    assert.strictEqual(posted['7'].inputs.cfg, 1.5, '预设的 cfg 应覆盖全局配置')
+
+    // 2) 需要图片输入的预设：直接拒绝并说明原因，不得提交到 ComfyUI
+    state.captured = null
+    const reply = await actions[0]({ session }, '--工作流 图生图：1girl')
+    assert.ok(String(reply).includes('不支持图生图'), '应明确提示需要图生图能力，实得：' + reply)
+    assert.strictEqual(state.captured, null, '不可用的预设不应提交到 ComfyUI')
+
+    // 3) 别名开头同样生效
+    await actions[0]({ session }, 'base：1girl')
+    assert.ok(state.captured, '别名应能选中预设')
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})

@@ -26,6 +26,7 @@ exports.usage = `
     输出更详细的配置与连通性诊断。
 - **尺寸：** 支持 \`竖图\` \`横图\` \`方图\` \`长竖图\` \`宽屏\` 或在描述中写 \`1024x1536：描述\` / \`--尺寸 1216x832\`。
 - **采样参数：** 描述里可写 \`--steps 40\` / \`--cfg 3.5\`（也可写 \`--步数\` / \`--强度\`）临时覆盖步数与 CFG，优先于 \`modelParams\` 与全局配置。
+- **工作流预设：** 配置里可登记多套工作流 JSON，用 \`--工作流 名称：描述\` 或直接以名称/别名开头（如 \`极速：描述\`）切换；\`画图 工作流\` 可列出所有预设及是否可用。
 - **原样模式：** 描述前加 \`无优化\` 直接提交写好的 tags。
 - **联网搜索：** 描述中带 \`联网\` / \`搜索\` / \`查一下\` 等词时，会先联网搜索补充角色设定（需配置 Tavily Key）。
 - **画师组：** \`创建画师组 名称=tags\` \`切换画师组 名称\` \`查看画师组\` \`删除画师组 名称\`
@@ -106,6 +107,21 @@ exports.Config = Schema.intersect([
     resolutionNodeId: Schema.string().default('').description('尺寸节点 ID（EmptyLatentImage，可留空；示例 5）'),
     seedNodeId: Schema.string().default('').description('种子节点 ID（KSampler，可留空；示例 3）'),
     stepsNodeId: Schema.string().default('').description('步数节点 ID（KSampler，可留空；示例 3）'),
+    workflowPresets: Schema.dict(Schema.object({
+      path: Schema.string().description('工作流 JSON 路径（相对 Koishi 运行目录）'),
+      aliases: Schema.array(Schema.string()).description('指令别名，例如 ["极速","fast"]'),
+      positivePromptNodeId: Schema.string().description('正面提示词节点 ID（留空自动识别）'),
+      negativePromptNodeId: Schema.string().description('负面提示词节点 ID（留空自动识别）'),
+      resolutionNodeId: Schema.string().description('尺寸节点 ID（留空自动识别）'),
+      seedNodeId: Schema.string().description('种子节点 ID（留空自动识别）'),
+      stepsNodeId: Schema.string().description('步数节点 ID（留空自动识别）'),
+      steps: Schema.number().description('该预设固定步数（如极速流 4）'),
+      cfg: Schema.number().description('该预设固定 CFG'),
+      samplerName: Schema.string().description('该预设固定采样器'),
+      scheduler: Schema.string().description('该预设固定调度器'),
+      overrideParameters: Schema.boolean().description('用上面的参数覆盖工作流内取值'),
+    }).description('预设')).default({}).description('工作流预设：key=预设名。指令里用 `--工作流 <名称>` 或名称/别名开头选择（如 `画图 极速：1girl`）'),
+    defaultWorkflowPreset: Schema.string().default('').description('默认预设名（留空则用上面的 customWorkflow* 那套）'),
   }).description('⑦ 自定义工作流').collapse(),
 
   Schema.object({
@@ -182,7 +198,7 @@ exports.Config = Schema.intersect([
 // 纯函数库已拆分到 lib/（解析 / tag 清洗 / 工作流 / Comfy 等待 / 多人规划 / HTTP 客户端）
 // ------------------------------------------------------------------
 const {
-  normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed, parseStepsCfg,
+  normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed, parseStepsCfg, parseWorkflowPreset,
   stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
 } = require('./lib/parse')
 const {
@@ -190,7 +206,7 @@ const {
   NO_ARTIST_RE, NO_STYLE_RE,
 } = require('./lib/tags')
 const {
-  buildWorkflow, inspectCustomWorkflow, isGgufUnet,
+  buildWorkflow, inspectCustomWorkflow, isGgufUnet, inspectWorkflowFile,
 } = require('./lib/workflows')
 const { outputImages, waitComfyResult } = require('./lib/comfy')
 const { materializeImageSource } = require('./lib/media')
@@ -282,6 +298,72 @@ exports.apply = async function apply(ctx, cfg) {
 
   // 自定义工作流路径一律相对 Koishi 运行目录解析（见 lib/workflows.js）
   const workflowOpts = () => ({ baseDir: ctx.baseDir || process.cwd() })
+
+  // ---------------- 工作流预设 ----------------
+  // 预设 = 一个 JSON 路径 + 可选的节点 ID / 采样参数覆盖，指令里按名字选用。
+  function presetList() {
+    const dict = cfg.workflowPresets
+    if (!dict || typeof dict !== 'object') return []
+    return Object.entries(dict)
+      .filter(([, value]) => value && typeof value === 'object')
+      .map(([name, value]) => ({ name, aliases: value.aliases || [], ...value }))
+  }
+
+  function findPreset(name) {
+    if (!name) return null
+    return presetList().find(preset => preset.name === name) || null
+  }
+
+  // 预设 → 生成用的配置补丁（工作流路径 + 节点 ID + 参数）
+  function presetCfgPatch(preset) {
+    if (!preset) return {}
+    const patch = {
+      customWorkflowEnabled: true,
+      customWorkflowPath: preset.path || '',
+      positivePromptNodeId: preset.positivePromptNodeId || '',
+      negativePromptNodeId: preset.negativePromptNodeId || '',
+      resolutionNodeId: preset.resolutionNodeId || '',
+      seedNodeId: preset.seedNodeId || '',
+      stepsNodeId: preset.stepsNodeId || '',
+      customWorkflowOverrideParameters: preset.overrideParameters != null
+        ? Boolean(preset.overrideParameters)
+        : Boolean(cfg.customWorkflowOverrideParameters),
+    }
+    return patch
+  }
+
+  // 预设里显式写死的参数，优先级高于 modelParams
+  function presetParams(preset) {
+    if (!preset) return {}
+    const out = {}
+    for (const key of ['steps', 'cfg', 'samplerName', 'scheduler', 'width', 'height']) {
+      if (preset[key] === undefined || preset[key] === null || preset[key] === '') continue
+      out[key] = key === 'samplerName' || key === 'scheduler' ? String(preset[key]).trim() : Number(preset[key])
+    }
+    return out
+  }
+
+  // 体检：这个预设现在能不能真的跑（能否从纯文本启动）
+  function inspectPreset(preset) {
+    return inspectWorkflowFile(preset.path, {
+      positivePromptNodeId: preset.positivePromptNodeId || '',
+      negativePromptNodeId: preset.negativePromptNodeId || '',
+      resolutionNodeId: preset.resolutionNodeId || '',
+      seedNodeId: preset.seedNodeId || '',
+      stepsNodeId: preset.stepsNodeId || '',
+      customWorkflowReloadOnChange: cfg.customWorkflowReloadOnChange,
+    }, workflowOpts())
+  }
+
+  // 指令里选了预设时先体检，不可用就给出人话原因
+  function checkPresetUsable(name) {
+    const preset = findPreset(name)
+    if (!preset) return { ok: false, message: `没有名为「${name}」的工作流预设。可用：${presetList().map(p => p.name).join('、') || '（未配置）'}` }
+    if (!String(preset.path || '').trim()) return { ok: false, message: `预设「${name}」没有填写 path。` }
+    const report = inspectPreset(preset)
+    if (!report.ok) return { ok: false, message: `预设「${name}」当前不可用：${report.error}` }
+    return { ok: true, preset }
+  }
 
   // A4：自定义工作流（Aesthetic 1.1）默认跳过质量前缀注入
   function shouldSkipQualityPrefix() {
@@ -468,6 +550,44 @@ exports.apply = async function apply(ctx, cfg) {
     return lines
   }
 
+  // 预设总览：每个预设能不能跑、需要什么（不实际生图）
+  function presetOverviewText() {
+    const presets = presetList()
+    if (!presets.length) {
+      return '还没有配置工作流预设。\n在「⑦ 自定义工作流 → workflowPresets」里添加，key 用预设名，例如：\n  workflowPresets:\n    极速4步:\n      path: data/p-draw/workflows/03-dmdx.json\n      aliases: [极速]'
+    }
+    const lines = ['工作流预设：']
+    for (const preset of presets) {
+      const report = inspectPreset(preset)
+      const aliases = (preset.aliases || []).length ? `（别名：${preset.aliases.join('、')}）` : ''
+      lines.push(`${report.ok ? '✅' : '❌'} ${preset.name}${aliases}`)
+      if (report.ok) {
+        const analysis = report.analysis
+        const pos = report.targets.positive.map(id => `#${id}`).join('、')
+        const neg = report.targets.negative.map(id => `#${id}`).join('、')
+        lines.push(`    节点 ${analysis.nodeCount} 个 · 正面 ${pos} · 负面 ${neg} · 尺寸 ${report.targets.resolutionIds.map(id => `#${id}`).join('、') || '（无）'}`)
+      } else {
+        lines.push(`    不可用：${report.error}`)
+      }
+    }
+    const def = String(cfg.defaultWorkflowPreset || '').trim()
+    lines.push(`默认预设：${def ? `${def}${findPreset(def) ? '' : '（未找到此预设，已回落）'}` : '（未设置，使用内置/自定义工作流）'}`)
+    lines.push('用法：画图 --工作流 <名称>：描述　或　画图 <别名>：描述')
+    return lines.join('\n')
+  }
+
+  // 诊断里附一段预设摘要
+  function presetDiagLines() {
+    const presets = presetList()
+    if (!presets.length) return []
+    const lines = [`工作流预设（${presets.length} 个）：`]
+    for (const preset of presets) {
+      const report = inspectPreset(preset)
+      lines.push(`  ${report.ok ? '✅' : '❌'} ${preset.name}${report.ok ? '' : ` — ${report.error}`}`)
+    }
+    return lines
+  }
+
   async function diagnoseText(session) {
     const payload = await statusPayload()
     const lines = ['【p-draw 诊断】']
@@ -508,6 +628,7 @@ exports.apply = async function apply(ctx, cfg) {
     // A7：自定义工作流 + 非空 qualityPrefix 的迁移提示
     const warning = qualityPrefixWarning()
     if (warning) lines.push(`⚠ ${warning}`)
+    lines.push(...presetDiagLines())
     return lines.join('\n')
   }
 
@@ -767,9 +888,15 @@ exports.apply = async function apply(ctx, cfg) {
   async function runComfyGenerate(prompt, size, overrides) {
     const sizes = parseAllowedSizes()
     const unetName = overrides.unet || cfg.unetName
-    // 应用该模型的独立参数覆盖（modelParams），再叠加命令级 overrides（overrides.steps/cfg 优先于模型级）
+    // 工作流预设：把路径 / 节点 ID 替换进配置，并取出预设写死的采样参数
+    const preset = overrides.preset || null
+    const presetExtra = presetParams(preset)
+    const baseCfg = preset ? Object.assign({}, cfg, presetCfgPatch(preset)) : cfg
+    // 应用该模型的独立参数覆盖（modelParams），再叠加预设参数与命令级 overrides
     const modelSpecific = resolveModelParams(unetName)
-    const workCfg = Object.assign({}, cfg, modelSpecific, { unetName })
+    const workCfg = Object.assign({}, baseCfg, modelSpecific, presetExtra, { unetName })
+    // 预设/modelParams 里显式配置的字段要覆盖自定义工作流内的取值
+    const overrideKeys = Object.assign({}, modelSpecific, presetExtra)
     const requestedWidth = (size && size[0]) || overrides.width || workCfg.width
     const requestedHeight = (size && size[1]) || overrides.height || workCfg.height
     // 防御：sampler/scheduler 配置若带尾随空格会导致 ComfyUI 报 "Value not in list"，统一 trim
@@ -781,7 +908,7 @@ exports.apply = async function apply(ctx, cfg) {
     const cfgVal = Number(overrides.cfg) || workCfg.cfg
     const seed = Number(overrides.seed) || crypto.randomInt(1, 2 ** 32 - 1)
     const negativePrompt = joinPromptParts([overrides.negativePrompt || cfg.negativePrompt || ''])
-    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), Object.assign({}, workflowOpts(), { modelParams: modelSpecific }))
+    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), Object.assign({}, workflowOpts(), { modelParams: overrideKeys }))
 
     const clientId = crypto.randomUUID()
     const submit = await comfyPost('/prompt', { prompt: promptBody, client_id: clientId }, 20000)
@@ -1331,7 +1458,7 @@ exports.apply = async function apply(ctx, cfg) {
 
   // 视觉校验（anima_verify + generation_verifier 移植）：对生成的图片跑视觉 LLM，
   // 不合格则用相同提示词重试（最多 multiCandidateCount 张），按多候选规则挑选并返回结果。
-  async function verifyGeneratedImages(session, images, userRequest, prompt, size, planCount, unet, negativePrompt) {
+  async function verifyGeneratedImages(session, images, userRequest, prompt, size, planCount, unet, negativePrompt, preset = null) {
     if (!hasLlm(cfg, 'vision')) {
       return { ok: true, degraded: true, message: '', verdict: null, outputs: images, prompt, negativePrompt }
     }
@@ -1443,7 +1570,7 @@ exports.apply = async function apply(ctx, cfg) {
       if (hint) {
         currentPrompt = `${userRequest}\n【上次问题，请修正】${hint}`
       }
-      const regen = await runComfyGenerate(currentPrompt, size, { unet, negativePrompt: currentNegativePrompt })
+      const regen = await runComfyGenerate(currentPrompt, size, Object.assign({ unet, negativePrompt: currentNegativePrompt }, preset ? { preset } : {}))
       if (!regen.ok) {
         logger.warn(`多人校验重试生成失败：${regen.message}`)
         break
@@ -1524,11 +1651,24 @@ exports.apply = async function apply(ctx, cfg) {
     const parsedBatch = parseBatchCount(parsedSize.prompt, cfg.batchMax)
     // 采样参数覆盖（--steps 40 / --cfg 3.5），并从描述中剥离，避免进入 LLM 规划
     const parsedTuning = parseStepsCfg(parsedBatch.prompt)
-    const text = parsedTuning.prompt
+    // 工作流预设（多人生图同样支持）
+    const parsedPreset = parseWorkflowPreset(parsedTuning.prompt, presetList())
+    if (parsedPreset.error) return parsedPreset.error
+    let activePreset = null
+    if (parsedPreset.preset) {
+      const usable = checkPresetUsable(parsedPreset.preset)
+      if (!usable.ok) return usable.message
+      activePreset = usable.preset
+    } else if (String(cfg.defaultWorkflowPreset || '').trim()) {
+      const usable = checkPresetUsable(String(cfg.defaultWorkflowPreset).trim())
+      if (usable.ok) activePreset = usable.preset
+      else if (cfg.outputLogs) logger.warn(`[p-draw] 默认预设不可用，已回落：${usable.message}`)
+    }
+    const text = parsedPreset.prompt
     if (!text) return session.text('.multi-usage')
     const count = parsedBatch.count
     const tuningOverrides = Object.assign(
-      {},
+      activePreset ? { preset: activePreset } : {},
       parsedTuning.steps != null ? { steps: parsedTuning.steps } : {},
       parsedTuning.cfg != null ? { cfg: parsedTuning.cfg } : {},
     )
@@ -1600,7 +1740,7 @@ exports.apply = async function apply(ctx, cfg) {
       if (!cfg.multiVerifyEnabled) {
         return { ok: true, outputs: result.outputs, seed: result.seed, prompt: finalPrompt, negativePrompt: result.negativePrompt, note: session.text('.multi-degraded', ['（未启用校验或未配置视觉模型）']) }
       }
-      const verified = await verifyGeneratedImages(session, result.outputs, text, finalPrompt, size, plan.characters.length, unet, result.negativePrompt || multiNegative)
+      const verified = await verifyGeneratedImages(session, result.outputs, text, finalPrompt, size, plan.characters.length, unet, result.negativePrompt || multiNegative, activePreset)
       if (!verified.ok) return { ok: false, message: verified.message }
       return { ok: true, outputs: verified.outputs, seed: result.seed, prompt: verified.prompt || finalPrompt, negativePrompt: verified.negativePrompt || result.negativePrompt || multiNegative, note: verified.message || '' }
     }
@@ -1824,6 +1964,9 @@ exports.apply = async function apply(ctx, cfg) {
       if (lower === '诊断' || lower === 'diagnose' || lower === '部署诊断' || lower === 'debug' || lower === '调试' || lower === '调试状态') {
         return await diagnoseText(session)
       }
+      if (lower === '工作流' || lower === '预设' || lower === 'workflow' || lower === 'workflows') {
+        return presetOverviewText()
+      }
 
       // 多人指令：p-draw 多人 <描述>
       const multiMatch = text.match(/^(?:多人|多人生图|双人|三人|群像)\s*(.*)$/)
@@ -1984,12 +2127,26 @@ exports.apply = async function apply(ctx, cfg) {
     const parsedSeed = parseSeed(parsedBatch.prompt)
     // 采样参数覆盖（--steps 40 / --cfg 3.5），并从提示词中剥离
     const parsedTuning = parseStepsCfg(parsedSeed.prompt)
-    const text = parsedTuning.prompt
+    // 工作流预设：--工作流 xxx 或开头裸写名称/别名
+    const parsedPreset = parseWorkflowPreset(parsedTuning.prompt, presetList())
+    if (parsedPreset.error) return parsedPreset.error
+    let activePreset = null
+    if (parsedPreset.preset) {
+      const usable = checkPresetUsable(parsedPreset.preset)
+      if (!usable.ok) return usable.message
+      activePreset = usable.preset
+    } else if (String(cfg.defaultWorkflowPreset || '').trim()) {
+      // 默认预设不可用时不阻断生成，回落到 customWorkflow* / 内置工作流
+      const usable = checkPresetUsable(String(cfg.defaultWorkflowPreset).trim())
+      if (usable.ok) activePreset = usable.preset
+      else if (cfg.outputLogs) logger.warn(`[p-draw] 默认预设不可用，已回落：${usable.message}`)
+    }
+    const text = parsedPreset.prompt
     const seed = parsedSeed.seed
     const count = parsedBatch.count
-    // 命令级参数优先于 modelParams 与全局配置（见 runComfyGenerate）
+    // 命令级参数优先于预设 / modelParams / 全局配置（见 runComfyGenerate）
     const tuningOverrides = Object.assign(
-      {},
+      activePreset ? { preset: activePreset } : {},
       parsedTuning.steps != null ? { steps: parsedTuning.steps } : {},
       parsedTuning.cfg != null ? { cfg: parsedTuning.cfg } : {},
     )

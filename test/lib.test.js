@@ -816,3 +816,93 @@ test('resolution nodes are detected across latent node variants (EmptySD3LatentI
   assert.strictEqual(w['28'].inputs.width, 832)
   assert.strictEqual(w['28'].inputs.height, 1216)
 })
+
+// ---------------- 工作流预设：解析 + 体检 ----------------
+
+test('parseWorkflowPreset handles the flag, bare aliases and unknown names', () => {
+  const presets = [
+    { name: '基础文生图', aliases: ['基础'] },
+    { name: '极速4步', aliases: ['极速', 'fast'] },
+    { name: '高清放大', aliases: ['高清'] },
+  ]
+
+  const flagged = parse.parseWorkflowPreset('--工作流 极速4步：1girl, solo', presets)
+  assert.strictEqual(flagged.preset, '极速4步')
+  assert.strictEqual(flagged.prompt, '1girl, solo')
+  assert.strictEqual(flagged.error, null)
+
+  const alias = parse.parseWorkflowPreset('极速：1girl, solo', presets)
+  assert.strictEqual(alias.preset, '极速4步')
+  assert.strictEqual(alias.prompt, '1girl, solo')
+
+  const spaced = parse.parseWorkflowPreset('高清 1girl', presets)
+  assert.strictEqual(spaced.preset, '高清放大')
+  assert.strictEqual(spaced.prompt, '1girl')
+
+  // 不匹配时原样返回，不误伤提示词
+  const plain = parse.parseWorkflowPreset('1girl, solo', presets)
+  assert.strictEqual(plain.preset, null)
+  assert.strictEqual(plain.prompt, '1girl, solo')
+
+  // 未知名称：报错并列出可用
+  const bad = parse.parseWorkflowPreset('--工作流 不存在：x', presets)
+  assert.strictEqual(bad.preset, null)
+  assert.ok(bad.error.includes('不存在'))
+  assert.ok(bad.error.includes('基础文生图'))
+
+  // 未配置任何预设时形同虚设
+  assert.deepStrictEqual(parse.parseWorkflowPreset('任意文本', []), { preset: null, prompt: '任意文本', error: null })
+})
+
+test('parseWorkflowPreset prefers the longest alias', () => {
+  const presets = [
+    { name: '短', aliases: ['高清'] },
+    { name: '长', aliases: ['高清重绘'] },
+  ]
+  assert.strictEqual(parse.parseWorkflowPreset('高清重绘：a girl', presets).preset, '长')
+  assert.strictEqual(parse.parseWorkflowPreset('高清：a girl', presets).preset, '短')
+})
+
+test('analyzeWorkflow tells text-startable graphs from image-input ones', () => {
+  const textOnly = wf.analyzeWorkflow(baselineGraph())
+  assert.strictEqual(textOnly.hasLatentStart, true)
+  assert.strictEqual(textOnly.canRunTextOnly, true)
+  assert.deepStrictEqual(textOnly.imageInputClasses, [])
+  assert.deepStrictEqual(textOnly.requires, [])
+
+  const withImage = Object.assign({}, baselineGraph(), {
+    50: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+    51: { class_type: 'VAEEncode', inputs: { pixels: ['50', 0], vae: ['15', 0] } },
+  })
+  const needsImage = wf.analyzeWorkflow(withImage)
+  assert.strictEqual(needsImage.canRunTextOnly, false)
+  assert.deepStrictEqual(needsImage.imageInputClasses, ['LoadImage'])
+  assert.ok(needsImage.requires.some(item => item.includes('图片输入')))
+
+  // 只有 ControlNet、没有 LoadImage
+  const controlOnly = Object.assign({}, baselineGraph(), {
+    60: { class_type: 'ControlNetApplyAdvanced', inputs: {} },
+  })
+  const withControl = wf.analyzeWorkflow(controlOnly)
+  assert.ok(withControl.requires.some(item => item.includes('ControlNet')))
+})
+
+test('inspectWorkflowFile reports availability without throwing', () => {
+  const dir = tmpDir('pdrawtest-preset-')
+  const good = writeWorkflowFile(dir, 'good.json', baselineGraph())
+  const bad = writeWorkflowFile(dir, 'needs-image.json', Object.assign({}, baselineGraph(), {
+    50: { class_type: 'LoadImage', inputs: { image: 'a.png' } },
+  }))
+
+  const okReport = wf.inspectWorkflowFile(good, {}, { baseDir: dir })
+  assert.strictEqual(okReport.ok, true)
+  assert.deepStrictEqual(okReport.targets.positive, ['6'])
+
+  const badReport = wf.inspectWorkflowFile(bad, {}, { baseDir: dir })
+  assert.strictEqual(badReport.ok, false)
+  assert.ok(badReport.error.includes('不支持图生图'))
+
+  const missing = wf.inspectWorkflowFile('nope.json', {}, { baseDir: dir })
+  assert.strictEqual(missing.ok, false)
+  assert.ok(missing.error.includes('不存在'))
+})

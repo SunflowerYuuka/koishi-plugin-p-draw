@@ -127,6 +127,8 @@ plugins:
 | `customWorkflowReloadOnChange` | 工作流文件变化时自动重载，无需重启（默认 `true`） |
 | `positivePromptNodeId` / `negativePromptNodeId` | 正/负面提示词节点 ID；留空自动识别 |
 | `resolutionNodeId` / `seedNodeId` / `stepsNodeId` | 尺寸 / 种子 / 步数节点 ID；可留空（留空则按节点类型覆盖） |
+| `workflowPresets` | 工作流预设字典：`预设名 → { path, aliases, 节点 ID, steps, cfg, ... }`，供指令按名切换（见下方「工作流预设」） |
+| `defaultWorkflowPreset` | 默认预设名；留空则使用 `customWorkflow*` 那套或内置工作流 |
 
 ### ⑧ 模型独立参数覆盖（折叠）
 
@@ -349,6 +351,66 @@ p-draw:
 - [ ] 使用 GGUF Q8_0 时，显存峰值不超过 7.5GB，1024×1024 / 30 步在 30 秒量级。
 - [ ] 替换工作流 JSON 后，在 `customWorkflowReloadOnChange: true` 下无需重启插件即生效。
 - [ ] `p-draw 诊断` 能显示实际工作流路径、更新时间与实际解析到的节点 ID。
+
+## 工作流预设
+
+Anima Aesthetic 1.1 官方/社区共 10 个工作流。插件**不内置任何 JSON**，你导出后登记成预设，指令里按名字切换。
+
+### 登记预设
+
+```yaml
+workflowPresets:
+  基础文生图:                       # 预设名 = 指令里用的名字
+    path: data/p-draw/workflows/09-baseline.json
+    aliases: [基础, base]           # 指令别名（可选）
+    positivePromptNodeId: '6'       # 节点 ID 可留空，插件会自动识别
+    negativePromptNodeId: '7'
+  极速4步:
+    path: data/p-draw/workflows/03-dmdx.json
+    aliases: [极速, fast]
+    steps: 4                        # 该预设固定步数，覆盖全局与 modelParams
+    cfg: 1.0
+    overrideParameters: true
+defaultWorkflowPreset: 基础文生图
+```
+
+### 指令用法
+
+```
+画图 --工作流 极速4步：1girl, solo
+画图 极速：1girl, solo          # 用别名开头，等效
+画图 工作流                      # 列出所有预设及其可用性
+```
+
+`画图 工作流` 会逐个体检并给出结论，例如：
+
+```
+✅ 基础文生图（别名：基础、base）
+    节点 9 个 · 正面 #6 · 负面 #7 · 尺寸 #5
+❌ 图生图（别名：i2i）
+    不可用：需要图片输入（LoadImage），当前版本不支持图生图
+```
+
+选了不可用的预设会**直接拒绝并说明原因**，不会静默失败或跑错工作流。
+
+### 10 个工作流的可用性对照
+
+| # | 工作流 | 节点 | 起点 | 当前版本 |
+|---|---|---|---|---|
+| 09 | Text-to-Image Baseline | 17 | 文本 | ✅ 可用 |
+| 03 | DMDX 4-Step Speed Run | 19 | 文本 | ✅ 可用（设 `steps: 4`、低 CFG） |
+| 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（多段采样+放大） |
+| 01 | 1.5x Upscale | 20 | 视导出而定 | ⚠️ 若含 `LoadImage` 则不可用 |
+| 05 | Tiled Upscale | 45 | 视导出而定 | ⚠️ 同上 |
+| 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ⚠️ ControlNet 分支需参考图，禁用后方可用 |
+| 02 | ControlNet Precision Control | 32 | 图片 | ❌ 需图生图 |
+| 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ❌ 需图生图 |
+| 07 | Image-to-Image | 19 | 图片 | ❌ 需图生图 |
+| 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 需图生图 |
+
+判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 01/05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。
+
+图生图能力（图片上传 + `LoadImage` 注入 + 重绘幅度）尚未实现，所以 ❌ 的四个目前只能等后续版本。
 
 ## 注意
 
