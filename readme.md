@@ -436,7 +436,7 @@ defaultWorkflowPreset: 基础文生图
 | 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（多段采样+放大） |
 | 01 | 1.5x Upscale | 20 | 文本 | ✅ 可用（见下方依赖） |
 | 05 | Tiled Upscale | 45 | 视导出而定 | ⚠️ 同上 |
-| 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ⚠️ ControlNet 分支需参考图，禁用后方可用 |
+| 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ✅ 可用（已裁成单输出；ControlNet 分支默认旁路，需检测器 + SAM 模型） |
 | 02 | ControlNet Precision Control | 32 | 图片 | ❌ 需图生图 |
 | 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ❌ 需图生图 |
 | 07 | Image-to-Image | 19 | 图片 | ❌ 需图生图 |

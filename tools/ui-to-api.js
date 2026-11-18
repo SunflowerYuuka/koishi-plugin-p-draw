@@ -17,6 +17,8 @@ const SRC = process.argv[2]
 const OUT = process.argv[3]
 const DROP_NODES = new Set((process.argv[4] || '').split(',').map(s => s.trim()).filter(Boolean).map(Number))
 const MODEL_NAME = (process.argv[5] || '').trim()
+// 只保留某个输出节点的整条依赖链（用于把多输出工作流裁成「一次只出一张」）
+const KEEP_OUTPUT = (process.argv[6] || '').trim()
 const SEED_NAMES = new Set(['seed', 'noise_seed'])
 
 if (!SRC || !OUT) {
@@ -113,6 +115,25 @@ function resolveSource(map, target, seen = new Set()) {
       inputs[name] = value
     }
     api[String(node.id)] = { class_type: node.type, inputs }
+  }
+
+  // 只保留指定输出节点的依赖链，其余全部删除（= 一次只出一张图）
+  if (KEEP_OUTPUT) {
+    const keep = new Set()
+    const walk = (id) => {
+      if (!id || keep.has(id) || !api[id]) return
+      keep.add(id)
+      for (const v of Object.values(api[id].inputs || {})) {
+        if (Array.isArray(v) && v.length === 2 && typeof v[0] === 'string') walk(v[0])
+      }
+    }
+    walk(KEEP_OUTPUT)
+    if (!keep.has(KEEP_OUTPUT)) {
+      console.error(`KEEP_OUTPUT=${KEEP_OUTPUT} 不在转换结果里，放弃裁剪`)
+      process.exit(1)
+    }
+    for (const k of Object.keys(api)) if (!keep.has(k)) delete api[k]
+    console.log(`已裁剪为只保留 #${KEEP_OUTPUT} 的依赖链，剩余 ${Object.keys(api).length} 个节点`)
   }
 
   fs.writeFileSync(OUT, JSON.stringify(api, null, 2))
