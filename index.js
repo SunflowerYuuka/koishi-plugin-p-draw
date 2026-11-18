@@ -189,6 +189,7 @@ exports.Config = Schema.object({
       samplerName: Schema.string().description('该预设固定采样器'),
       scheduler: Schema.string().description('该预设固定调度器'),
       overrideParameters: Schema.boolean().description('用上面的参数覆盖工作流内取值'),
+      price: Schema.number().description('该预设每张消耗的 P 点（留空沿用全局 price / multiPrice）'),
       overrideModel: Schema.boolean().description('是否把 unetName 写进这个工作流的模型节点（留空沿用全局）'),
       modelLoaderNodeId: Schema.string().description('该预设的模型加载节点 ID（留空沿用全局）'),
     }).description('预设')).default({}).description('工作流预设：key=预设名。指令里用 `--工作流 <名称>` 或名称/别名开头选择（如 `画图 极速：1girl`）'),
@@ -412,6 +413,13 @@ exports.apply = async function apply(ctx, rawConfig) {
       out[key] = key === 'samplerName' || key === 'scheduler' ? String(preset[key]).trim() : Number(preset[key])
     }
     return out
+  }
+
+  // 预设可以单独定价；没配就回落到全局 price / multiPrice
+  function presetPrice(preset) {
+    if (!preset || preset.price === undefined || preset.price === null || preset.price === '') return null
+    const value = Number(preset.price)
+    return Number.isFinite(value) && value >= 0 ? value : null
   }
 
   // 体检：这个预设现在能不能真的跑（能否从纯文本启动）
@@ -643,7 +651,9 @@ exports.apply = async function apply(ctx, rawConfig) {
     for (const preset of presets) {
       const report = inspectPreset(preset)
       const aliases = (preset.aliases || []).length ? `（别名：${preset.aliases.join('、')}）` : ''
-      lines.push(`${report.ok ? '✅' : '❌'} ${preset.name}${aliases}`)
+      const unit = presetPrice(preset)
+      const priceTag = unit != null ? `  ${unit} P/张` : '  默认价'
+      lines.push(`${report.ok ? '✅' : '❌'} ${preset.name}${aliases}${priceTag}`)
       if (report.ok) {
         const analysis = report.analysis
         const pos = report.targets.positive.map(id => `#${id}`).join('、')
@@ -1725,7 +1735,7 @@ exports.apply = async function apply(ctx, rawConfig) {
     const USERID = session.userId
     const isAdmin = isAdminUser(session)
     const unet = await resolveUnet(USERID)
-    const price = Math.max(0, parseInt(cfg.multiPrice) || cfg.price)
+    let price = Math.max(0, parseInt(cfg.multiPrice) || cfg.price)
     if (cfg.outputLogs) {
       logger.info(`[p-draw] 多人请求 userId=${USERID} isAdmin=${isAdmin}`)
     }
@@ -1751,6 +1761,8 @@ exports.apply = async function apply(ctx, rawConfig) {
       if (usable.ok) activePreset = usable.preset
       else if (cfg.outputLogs) logger.warn(`[p-draw] 默认预设不可用，已回落：${usable.message}`)
     }
+    const presetUnitPrice = presetPrice(activePreset)
+    if (presetUnitPrice != null) price = presetUnitPrice
     const text = parsedPreset.prompt
     if (!text) return session.text('.multi-usage')
     const count = parsedBatch.count
@@ -2231,6 +2243,8 @@ exports.apply = async function apply(ctx, rawConfig) {
     const text = parsedPreset.prompt
     const seed = parsedSeed.seed
     const count = parsedBatch.count
+    // 预设可单独定价，未配置则用全局 price
+    const unitPrice = presetPrice(activePreset) ?? Math.max(0, Number(cfg.price) || 0)
     // 命令级参数优先于预设 / modelParams / 全局配置（见 runComfyGenerate）
     const tuningOverrides = Object.assign(
       activePreset ? { preset: activePreset } : {},
@@ -2243,7 +2257,7 @@ exports.apply = async function apply(ctx, rawConfig) {
 
     // P 点校验（按总价 = 张数 × 单价）
     // P 点校验（按总价 = 张数 × 单价）
-    const pcheck = await precheckPoints(session, USERID, isAdmin, count * cfg.price)
+    const pcheck = await precheckPoints(session, USERID, isAdmin, count * unitPrice)
     if (!pcheck.ok) return pcheck.message
 
     // 原样模式
@@ -2333,8 +2347,8 @@ exports.apply = async function apply(ctx, rawConfig) {
 
     // 扣 P 点（一次性扣除总价）
     if (!isAdmin) {
-      const saving = await deductP(USERID, count * cfg.price)
-      if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 已扣除 ${count * cfg.price} P 点（${count} 张 × ${cfg.price}），余额 ${saving - count * cfg.price}`)
+      const saving = await deductP(USERID, count * unitPrice)
+      if (cfg.outputLogs) logger.info(`[p-draw] ${USERID} 已扣除 ${count * unitPrice} P 点（${count} 张 × ${unitPrice}），余额 ${saving - count * unitPrice}`)
     }
 
     // 用户手写了 negative: 区块时，默认负面词仍保留；用户 tag 只补充未出现的部分。
@@ -2356,7 +2370,7 @@ exports.apply = async function apply(ctx, rawConfig) {
       }
       const generated = await runComfyGenerate(p, parsedSize.size, generationOverrides)
       return { ...generated, prompt: p }
-    }, { USERID, isAdmin, totalPrice: count * cfg.price })
+    }, { USERID, isAdmin, totalPrice: count * unitPrice })
     if (!queued.ok) return queued.message
     const queuedTasks = queued.tasks
     const firstPosition = queued.firstPosition
@@ -2399,7 +2413,7 @@ exports.apply = async function apply(ctx, rawConfig) {
       return result
     }
 
-    const { results, successCount } = await executeBatch(USERID, isAdmin, count, cfg.price, runOne)
+    const { results, successCount } = await executeBatch(USERID, isAdmin, count, unitPrice, runOne)
 
     // 汇总
     const allOutputs = []
@@ -2418,7 +2432,7 @@ exports.apply = async function apply(ctx, rawConfig) {
 
     const chargeNotice = buildChargeNotice({
       isAdmin,
-      totalPrice: successCount * cfg.price,
+      totalPrice: successCount * unitPrice,
       unetName: unet,
       seeds,
     })
@@ -2580,5 +2594,5 @@ exports.apply = async function apply(ctx, rawConfig) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir, normalizeConfig, presetList, presetOverviewText }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir, normalizeConfig, presetList, presetOverviewText, presetPrice }
 }

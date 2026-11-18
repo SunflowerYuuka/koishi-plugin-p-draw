@@ -85,9 +85,14 @@ function startStubComfy() {
   return { state, server }
 }
 
-function makeCtx(baseDir) {
-  const tables = { p_draw_config: [], p_draw_fixed_characters: [] }
+function makeCtx(baseDir, initialTables = {}) {
+  const tables = {
+    p_draw_config: [],
+    p_draw_fixed_characters: [],
+    ...Object.fromEntries(Object.entries(initialTables).map(([k, v]) => [k, v.map(r => ({ ...r }))])),
+  }
   const actions = []
+  let nextId = 1
   const matches = (row, query) => Object.entries(query || {}).every(([key, value]) => row[key] === value)
   const noop = () => {}
   const ctx = {
@@ -101,11 +106,24 @@ function makeCtx(baseDir) {
     },
     database: {
       get: async (table, query = {}) => (tables[table] || []).filter((row) => matches(row, query)).map((row) => ({ ...row })),
-      set: async () => {},
-      create: async () => ({}),
-      remove: async () => {},
+      set: async (table, query, data) => {
+        for (const row of tables[table] || []) {
+          if (matches(row, query)) Object.assign(row, data)
+        }
+      },
+      create: async (table, data) => {
+        const row = { ...data }
+        if (row.id == null) row.id = nextId++
+        if (!tables[table]) tables[table] = []
+        tables[table].push(row)
+        return { ...row }
+      },
+      remove: async (table, query) => {
+        tables[table] = (tables[table] || []).filter((row) => !matches(row, query))
+      },
     },
   }
+  ctx.tables = tables
   ctx.command = () => {
     const chain = { alias: () => chain, action: (handler) => { actions.push(handler); return chain } }
     return chain
@@ -420,6 +438,57 @@ test('end-to-end: --工作流 picks the preset JSON, and image-input presets are
     // 3) 别名开头同样生效
     await actions[0]({ session }, 'base：1girl')
     assert.ok(state.captured, '别名应能选中预设')
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})
+
+test('end-to-end: a preset charges its own price instead of the global one', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+
+  const { state, server } = startStubComfy()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  try {
+    const baseDir = tmpDir('pdrawtest-price-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    fs.writeFileSync(path.join(wfDir, 'preset-basic.json'), JSON.stringify(aestheticGraph()))
+
+    // 余额 5000，非管理员
+    const { ctx, actions } = makeCtx(baseDir, { p_system: [{ userid: '30001', p: 5000 }] })
+    const plugin = require('../index.js')
+    const config = Object.assign(makeCfg(port), {
+      adminUsers: [],
+      price: 500,                       // 全局价
+      workflowPresets: {
+        精修: {
+          path: 'data/p-draw/workflows/preset-basic.json',
+          aliases: ['repair'],
+          price: 2500,                  // 预设价
+        },
+      },
+    })
+    await plugin.apply(ctx, config)
+
+    const session = {
+      userId: '30001',
+      platform: 'onebot',
+      messageId: 'm5',
+      event: { message: { id: 'm5' } },
+      text: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''),
+      send: async () => {},
+    }
+
+    await actions[0]({ session }, '--工作流 精修：1girl, solo')
+    const row = ctx.database ? null : null
+    const user = (ctx.tables ? ctx.tables.p_system : []).find(u => u.userid === '30001')
+    assert.ok(user, '应能找到用户余额记录')
+    assert.strictEqual(user.p, 2500, `应按预设价 2500 扣费，实得扣后余额 ${user.p}`)
+    assert.ok(state.captured, '应已提交到 ComfyUI')
   } finally {
     server.close()
     if (savedWebSocket) globalThis.WebSocket = savedWebSocket

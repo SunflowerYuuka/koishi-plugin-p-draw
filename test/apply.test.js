@@ -620,3 +620,16 @@ test('normalizeConfig flattens groups and lets legacy flat keys win', () => {
   assert.strictEqual(r3.config.unetName, 'flat.safetensors')
   assert.deepStrictEqual(r3.legacy, ['unetName'])
 })
+
+// ---------------- 按预设定价 ----------------
+
+test('presetPrice returns per-preset price and falls back when unset', () => {
+  const f = iface.presetPrice
+  assert.strictEqual(f(null), null, '没有预设 → 用全局价')
+  assert.strictEqual(f({}), null, '预设没配 price → 用全局价')
+  assert.strictEqual(f({ price: '' }), null)
+  assert.strictEqual(f({ price: 'abc' }), null)
+  assert.strictEqual(f({ price: 0 }), 0, '0 是合法值（免费）')
+  assert.strictEqual(f({ price: 1200 }), 1200)
+  assert.strictEqual(f({ price: '800' }), 800)
+})
