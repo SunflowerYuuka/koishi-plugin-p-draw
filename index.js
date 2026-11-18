@@ -33,99 +33,123 @@ exports.usage = `
  `;
 
 const { zhCN } = require('./lib/i18n')
-exports.Config = Schema.object({
-  // ComfyUI 连接
-  comfyuiBaseUrl: Schema.string().default('http://127.0.0.1:8188').description('ComfyUI 地址'),
-  workflow: Schema.string().default('anima_t2i').description('工作流类型（内置 anima_t2i）'),
-  customWorkflowEnabled: Schema.boolean().default(false).description('使用自定义 ComfyUI 工作流 JSON'),
-  customWorkflowPath: Schema.string().default('').description('自定义工作流 JSON 路径（相对 Koishi 运行目录，例如 data/p-draw/workflows/anima-aesthetic-v1.1.json；插件目录作为回退）'),
-  customWorkflowOverrideParameters: Schema.boolean().default(false).description('用插件参数覆盖自定义工作流参数'),
-  customWorkflowReloadOnChange: Schema.boolean().default(true).description('工作流 JSON 变化时自动重载（无需重启插件）'),
-  positivePromptNodeId: Schema.string().default('').description('自定义工作流中正面提示词节点 ID（留空自动识别；示例 6，以实际 JSON 为准）'),
-  negativePromptNodeId: Schema.string().default('').description('自定义工作流中负面提示词节点 ID（留空自动识别；示例 7，以实际 JSON 为准）'),
-  resolutionNodeId: Schema.string().default('').description('自定义工作流中尺寸节点 ID（EmptyLatentImage，可留空；示例 5）'),
-  seedNodeId: Schema.string().default('').description('自定义工作流中种子节点 ID（KSampler，可留空；示例 3）'),
-  stepsNodeId: Schema.string().default('').description('自定义工作流中步数节点 ID（KSampler，可留空；示例 3）'),
-  timeout: Schema.number().default(300).description('单次生成超时（秒）'),
-  pollInterval: Schema.number().default(2).description('生成状态查询间隔（秒）'),
+// 配置分组：用 Schema.intersect 让控制台按「可折叠小节」渲染，
+// 同时解析结果仍是扁平对象 —— 旧的 koishi.yml 键名不变，无需迁移。
+exports.Config = Schema.intersect([
+  // ---------------- 常用（默认展开） ----------------
+  Schema.object({
+    comfyuiBaseUrl: Schema.string().default('http://127.0.0.1:8188').description('ComfyUI 地址'),
+    timeout: Schema.number().default(300).description('单次生成超时（秒）'),
+    pollInterval: Schema.number().default(2).description('生成状态查询间隔（秒）'),
+  }).description('① ComfyUI 连接'),
 
-  // 模型文件
-  unetName: Schema.string().default('anima-aesthetic-v1.1.safetensors').description('主模型文件名（需与 ComfyUI models/diffusion_models 下的文件名完全一致，含连字符）。8G 显存推荐改为 GGUF Q8_0 版（如 anima-aesthetic-v1.1-Q8_0.gguf），插件会自动改用 UnetLoaderGGUF 加载'),
-  useGgufUnet: Schema.union([
-    Schema.const('auto').description('按模型文件名自动判断（.gguf 用 UnetLoaderGGUF）'),
-    Schema.const('true').description('强制使用 UnetLoaderGGUF（需安装 ComfyUI-GGUF）'),
-    Schema.const('false').description('强制使用原生 UNETLoader'),
-  ]).default('auto').description('主模型加载方式（auto / true / false）'),
-  modelParams: Schema.dict(Schema.object({
-    samplerName: Schema.string().description('采样器（如 er_sde / res_2s / dpmpp_2m）'),
-    scheduler: Schema.string().description('调度器（如 simple / beta57 / normal）'),
-    steps: Schema.number().description('采样步数'),
-    cfg: Schema.number().description('CFG 强度'),
-    width: Schema.number().description('默认宽度'),
-    height: Schema.number().description('默认高度'),
-  }).description('该模型的生成参数覆盖')).default({}).description('每个模型独立参数覆盖：key=模型文件名（如 anima-base-v1.0.safetensors、Anima-2.9B-preview-v1.safetensors、anima-aesthetic-v1.1.safetensors），value=要覆盖的参数（samplerName/scheduler/steps/cfg/width/height）。只填需要覆盖的字段，不填的用全局默认。匹配不区分大小写与 -/_。'),
-  clipName: Schema.string().default('qwen_3_06b_base.safetensors').description('文本编码器文件名'),
-  vaeName: Schema.string().default('qwen_image_vae.safetensors').description('VAE 文件名'),
+  Schema.object({
+    unetName: Schema.string().default('anima-aesthetic-v1.1.safetensors').description('主模型文件名，需与 ComfyUI models/diffusion_models 下的文件名完全一致；8G 显存可填 .gguf 版（插件自动改用 UnetLoaderGGUF）'),
+    useGgufUnet: Schema.union([
+      Schema.const('auto').description('按文件名自动判断（.gguf → UnetLoaderGGUF）'),
+      Schema.const('true').description('强制 UnetLoaderGGUF（需安装 ComfyUI-GGUF）'),
+      Schema.const('false').description('强制原生 UNETLoader'),
+    ]).default('auto').description('主模型加载方式'),
+    clipName: Schema.string().default('qwen_3_06b_base.safetensors').description('文本编码器文件名（ComfyUI models/text_encoders）'),
+    vaeName: Schema.string().default('qwen_image_vae.safetensors').description('VAE 文件名（ComfyUI models/vae）'),
+    width: Schema.number().default(832).description('默认宽度'),
+    height: Schema.number().default(1216).description('默认高度'),
+    allowedSizes: Schema.array(Schema.string()).default(['832x1216', '896x1152', '1024x1024', '1152x896', '1216x832', '768x1344', '1344x768', '1024x1536']).description('可用尺寸列表（宽x高）'),
+    steps: Schema.number().default(30).description('采样步数'),
+    cfg: Schema.number().default(4.0).description('CFG 强度（Aesthetic 1.1 推荐 4，用 3 也常更好）'),
+    samplerName: Schema.string().default('er_sde').description('采样器'),
+    scheduler: Schema.string().default('simple').description('调度器'),
+  }).description('② 模型与采样参数'),
 
-  // 出图参数
-  width: Schema.number().default(832).description('默认宽度'),
-  height: Schema.number().default(1216).description('默认高度'),
-  allowedSizes: Schema.array(Schema.string()).default(['832x1216', '896x1152', '1024x1024', '1152x896', '1216x832', '768x1344', '1344x768', '1024x1536']).description('可用尺寸列表（宽x高）'),
-  steps: Schema.number().default(30).description('采样步数'),
-  cfg: Schema.number().default(4.0).description('CFG 强度（Aesthetic 1.1 推荐 4，用 3 也常能出更好效果）'),
-  samplerName: Schema.string().default('er_sde').description('采样器'),
-  scheduler: Schema.string().default('simple').description('调度器'),
+  Schema.object({
+    qualityPrefix: Schema.string().default('').description('质量词前缀（Aesthetic 1.1 建议留空；Base 模型可填 masterpiece, best quality, score_7）'),
+    negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词'),
+    styleTags: Schema.string().default('').description('画风 tags'),
+    defaultArtistTags: Schema.string().default('').description('备用画师 tags'),
+    activeArtistPreset: Schema.string().default('').description('启用的画师组名称'),
+    artistPresets: Schema.array(Schema.string()).default([]).description('画师组（格式：名称=tags）'),
+    fixedCharacters: Schema.array(Schema.string()).default([]).description('固定角色（格式：角色名=tags；仅兼容旧配置，运行时以数据库为准）'),
+  }).description('③ 提示词与画师'),
 
-  // 提示词（默认值按 Design.md A4：Aesthetic 1.1 训练时已剥离质量标签，不需要质量前缀）
-  qualityPrefix: Schema.string().default('').description('质量词前缀（使用 Aesthetic 1.1 时建议留空；Base 模型可填 masterpiece, best quality, score_7）'),
-  skipQualityPrefixForCustomWorkflow: Schema.boolean().default(true).description('启用自定义工作流时自动跳过质量前缀注入（Aesthetic 模型不需要质量标签）'),
-  negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词（Aesthetic 1.1 推荐值）'),
-  promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需要配置下方 LLM 接口）'),
-  llmBaseUrl: Schema.string().default('').description('LLM 接口地址（OpenAI 兼容，例如 https://api.deepseek.com/v1）'),
-  llmApiKey: Schema.string().role('secret').default('').description('LLM API Key'),
-  llmModel: Schema.string().default('').description('LLM 模型名（留空则不优化，原样生图）'),
-  llmMaxTokens: Schema.number().default(1000).description('LLM 输出上限'),
-  webSearchEnabled: Schema.boolean().default(false).description('启用联网搜索（指令里写“联网/搜索/查一下”等触发）'),
-  tavilyApiKey: Schema.string().role('secret').default('').description('Tavily API Key（联网搜索用，https://tavily.com 申请）'),
-  webSearchMaxResults: Schema.number().default(5).description('联网搜索结果数量'),
-  webSearchDepth: Schema.string().default('basic').description('搜索深度（basic / advanced）'),
-  webSearchQueryTemplate: Schema.string().default('{prompt} 角色 外观 立绘 服装 配色 武器 官方图 official art character design outfit appearance wiki fandom').description('搜索词模板（{prompt} 代表用户需求）'),
-  promptOptimizeTemplate: Schema.string().description('自然语言优化模板（支持 {theme} {search_block} 占位符）').default('你是为 Anima 图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 除上述明确要求外，可以自由决定服装细节、姿态、构图、镜头、背景、环境、光影、色彩、氛围、前景和特效。\n- 以最终图像协调、精致、有表现力和好看为优先，不需要机械追求固定 Tag 数量。\n- 不要为了数量重复同义词；画面已经完整时即可停止。\n- 请自行解决明显冲突，直接输出你认为最适合生成最终画面的版本。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}'),
-  artistPresets: Schema.array(Schema.string()).default([]).description('画师组（格式：名称=tags）'),
-  activeArtistPreset: Schema.string().default('').description('启用的画师组名称'),
-  defaultArtistTags: Schema.string().default('').description('备用画师 tags'),
-  styleTags: Schema.string().default('').description('画风 tags'),
-  fixedCharacters: Schema.array(Schema.string()).default([]).description('固定角色（格式：角色名=tags；仅用于兼容旧配置，运行时数据保存在数据库）'),
+  Schema.object({
+    queueEnabled: Schema.boolean().default(true).description('启用生成队列（逐张顺序执行）'),
+    queueMaxRequests: Schema.number().default(5).description('队列最大任务数（0 表示不限制）'),
+    batchMax: Schema.number().default(4).description('单次指令最多生成的张数'),
+  }).description('④ 队列与批量'),
 
-  // 队列
-  queueEnabled: Schema.boolean().default(true).description('启用生成队列（逐张顺序执行）'),
-  queueMaxRequests: Schema.number().default(5).description('队列最大任务数（0 表示不限制）'),
-  batchMax: Schema.number().default(4).description('单次指令最多生成的张数（支持 x3 / 3张 / --数量 3 等写法）'),
+  Schema.object({
+    price: Schema.number().default(500).description('一张图消耗的 P 点'),
+    multiPrice: Schema.number().default(900).description('多人指令单张消耗的 P 点'),
+    couponPrice: Schema.number().default(3000).description('提示词优化券单价（可被 data/p-shop.json 覆盖）'),
+    couponAskTimeout: Schema.number().default(60).description('优化券确认等待时间（秒）'),
+    adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID'),
+  }).description('⑤ P 点与优化券'),
 
-  // P 点
-  price: Schema.number().default(500).description('一张图消耗的 P 点'),
-  multiPrice: Schema.number().default(900).description('多人指令（p-draw 多人）单张消耗的 P 点'),
-  couponPrice: Schema.number().default(3000).description('提示词优化券单价（P 点/张，购买询问时显示；可自动读取 data/p-shop.json 里的价格覆盖）'),
-  couponAskTimeout: Schema.number().default(60).description('提示词优化券确认等待时间（秒）'),
-  adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID 列表'),
-  outputLogs: Schema.boolean().default(true).description('是否在控制台输出详细日志'),
+  Schema.object({
+    adminOnly: Schema.boolean().default(false).description('仅管理员可用'),
+    allowedUserIds: Schema.array(Schema.string()).default([]).description('用户白名单（留空不限制）'),
+    blockedUserIds: Schema.array(Schema.string()).default([]).description('用户黑名单（优先于白名单）'),
+    allowedGroupIds: Schema.array(Schema.string()).default([]).description('群白名单（留空不限制）'),
+    blockedGroupIds: Schema.array(Schema.string()).default([]).description('群黑名单（优先于白名单）'),
+    outputLogs: Schema.boolean().default(true).description('输出详细日志'),
+  }).description('⑥ 权限与日志'),
 
-  // 多人（移植自 anima /anm 多人）
-  multiVerifyEnabled: Schema.boolean().default(true).description('多人图生成后启用视觉校验（需配置下方视觉模型）'),
-  multiVerifyPassScore: Schema.number().default(6).description('多人视觉校验合格分数（0-10）'),
-  multiCandidateCount: Schema.number().default(2).description('多人候选采样数量（校验失败时最多重试 候选数-1 次）'),
-  multiSendDegradedCandidate: Schema.boolean().default(true).description('多人候选全部不达标时仍发送最优候选（false 则丢弃）'),
-  verifyLlmBaseUrl: Schema.string().default('').description('视觉校验 LLM 接口地址（OpenAI 兼容；留空则跳过校验）'),
-  verifyLlmApiKey: Schema.string().role('secret').default('').description('视觉校验 LLM API Key'),
-  verifyLlmModel: Schema.string().default('').description('视觉校验 LLM 模型名（需支持图片输入，如 qwen-vl）'),
+  // ---------------- 进阶（默认折叠） ----------------
+  Schema.object({
+    customWorkflowEnabled: Schema.boolean().default(false).description('使用自定义 ComfyUI 工作流 JSON'),
+    customWorkflowPath: Schema.string().default('').description('工作流 JSON 路径（相对 Koishi 运行目录，如 data/p-draw/workflows/anima-aesthetic-v1.1.json）'),
+    skipQualityPrefixForCustomWorkflow: Schema.boolean().default(true).description('启用自定义工作流时跳过质量前缀注入'),
+    customWorkflowOverrideParameters: Schema.boolean().default(false).description('用插件参数覆盖工作流内的采样参数'),
+    customWorkflowReloadOnChange: Schema.boolean().default(true).description('工作流文件变化时自动重载（无需重启）'),
+    positivePromptNodeId: Schema.string().default('').description('正面提示词节点 ID（留空自动识别；示例 6，以实际 JSON 为准）'),
+    negativePromptNodeId: Schema.string().default('').description('负面提示词节点 ID（留空自动识别；示例 7）'),
+    resolutionNodeId: Schema.string().default('').description('尺寸节点 ID（EmptyLatentImage，可留空；示例 5）'),
+    seedNodeId: Schema.string().default('').description('种子节点 ID（KSampler，可留空；示例 3）'),
+    stepsNodeId: Schema.string().default('').description('步数节点 ID（KSampler，可留空；示例 3）'),
+  }).description('⑦ 自定义工作流').collapse(),
 
-  // 权限
-  adminOnly: Schema.boolean().default(false).description('仅管理员可用（adminUsers 中的用户）'),
-  allowedUserIds: Schema.array(Schema.string()).default([]).description('用户白名单（QQ 号，留空表示不限制）'),
-  blockedUserIds: Schema.array(Schema.string()).default([]).description('用户黑名单（QQ 号，黑名单优先于白名单）'),
-  allowedGroupIds: Schema.array(Schema.string()).default([]).description('QQ 群白名单（群号，留空表示不限制）'),
-  blockedGroupIds: Schema.array(Schema.string()).default([]).description('QQ 群黑名单（群号，黑名单优先于白名单）'),
-}).i18n({
+  Schema.object({
+    modelParams: Schema.dict(Schema.object({
+      samplerName: Schema.string().description('采样器'),
+      scheduler: Schema.string().description('调度器'),
+      steps: Schema.number().description('采样步数'),
+      cfg: Schema.number().description('CFG 强度'),
+      width: Schema.number().description('默认宽度'),
+      height: Schema.number().description('默认高度'),
+    }).description('该模型的参数覆盖')).default({}).description('按模型覆盖参数：key=模型文件名，value 只填要覆盖的字段。优先级：命令级 --steps/--cfg > 本节 > 全局配置'),
+  }).description('⑧ 模型独立参数覆盖').collapse(),
+
+  Schema.object({
+    promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需配置下面的 LLM 接口）'),
+    llmBaseUrl: Schema.string().default('').description('LLM 接口地址（OpenAI 兼容，如 https://api.deepseek.com/v1）'),
+    llmApiKey: Schema.string().role('secret').default('').description('LLM API Key'),
+    llmModel: Schema.string().default('').description('LLM 模型名（留空则不优化）'),
+    llmMaxTokens: Schema.number().default(1000).description('LLM 输出上限'),
+    promptOptimizeTemplate: Schema.string().description('优化模板（支持 {theme} {search_block} {character_rule} 占位符）').default('你是为 Anima 图像生成模型编写正面提示词的 AI 画师。\n\n请根据用户的原始要求设计一幅完整、协调、具有视觉吸引力的画面，并将结果输出为英文 Danbooru-style tags。\n\n输出要求：\n- 只输出一行英文 tags，使用英文逗号分隔。\n- 不要输出解释、分析、标题、编号、Markdown、代码块或中文。\n- 不要输出 masterpiece、best quality、score 等质量前缀。\n- 不要输出画师 tags；质量词和画师组会由程序另行拼接。\n- 尽量使用模型容易理解的可见画面描述。\n- 保持用户明确指定的角色、主体、人数、关键服装、动作、表情和道具。\n- 除上述明确要求外，可以自由决定服装细节、姿态、构图、镜头、背景、环境、光影、色彩、氛围、前景和特效。\n- 以最终图像协调、精致、有表现力和好看为优先，不需要机械追求固定 Tag 数量。\n- 不要为了数量重复同义词；画面已经完整时即可停止。\n- 请自行解决明显冲突，直接输出你认为最适合生成最终画面的版本。\n\n角色和动态上下文：\n{character_rule}\n{search_block}\n\n用户原始要求：\n{theme}'),
+  }).description('⑨ 提示词优化 / LLM').collapse(),
+
+  Schema.object({
+    webSearchEnabled: Schema.boolean().default(false).description('启用联网搜索（指令里写「联网/搜索/查一下」触发）'),
+    tavilyApiKey: Schema.string().role('secret').default('').description('Tavily API Key（https://tavily.com）'),
+    webSearchMaxResults: Schema.number().default(5).description('搜索结果数量'),
+    webSearchDepth: Schema.string().default('basic').description('搜索深度（basic / advanced）'),
+    webSearchQueryTemplate: Schema.string().default('{prompt} 角色 外观 立绘 服装 配色 武器 官方图 official art character design outfit appearance wiki fandom').description('搜索词模板（{prompt} 代表用户需求）'),
+  }).description('⑩ 联网搜索').collapse(),
+
+  Schema.object({
+    multiVerifyEnabled: Schema.boolean().default(true).description('多人图生成后启用视觉校验'),
+    multiVerifyPassScore: Schema.number().default(6).description('校验合格分数（0-10）'),
+    multiCandidateCount: Schema.number().default(2).description('候选采样数量（最多重试 候选数-1 次）'),
+    multiSendDegradedCandidate: Schema.boolean().default(true).description('全部候选不达标时仍发送最优候选'),
+    verifyLlmBaseUrl: Schema.string().default('').description('视觉校验接口地址（OpenAI 兼容；留空跳过校验）'),
+    verifyLlmApiKey: Schema.string().role('secret').default('').description('视觉校验 API Key'),
+    verifyLlmModel: Schema.string().default('').description('视觉校验模型名（需支持图片输入，如 qwen-vl）'),
+  }).description('⑪ 多人视觉校验').collapse(),
+
+  Schema.object({
+    workflow: Schema.string().default('anima_t2i').description('旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 anima_t2i'),
+  }).description('⑫ 兼容项（旧版，可忽略）').collapse(),
+]).i18n({
   'zh-CN': zhCN,
 })
 

@@ -180,7 +180,7 @@ test('fixed characters migrate once into their dedicated table and drive command
   assert.deepStrictEqual(extension.fields, { id: 'unsigned', name: 'string', tags: 'text' })
   const legacyExtension = localCtx.operations.find(operation => operation.type === 'extend' && operation.table === 'p_draw_config')
   assert.strictEqual(legacyExtension.fields.fixed_characters, 'json')
-  assert.ok(plugin.Config.dict.fixedCharacters)
+  assert.ok('fixedCharacters' in plugin.Config({}))
   assert.deepStrictEqual(localCtx.tables.p_draw_fixed_characters.map(({ name, tags }) => ({ name, tags })), [
     { name: '狐莉', tags: '1girl, fox girl' },
     { name: '小明', tags: '1boy, black hair' },
@@ -455,7 +455,7 @@ test('continuous generation is absent from configuration, help, and command hand
   const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8')
   const removedMessageKey = ['ser', 'ies-usage'].join('')
 
-  assert.strictEqual(plugin.Config.dict.seriesAskTimeout, undefined)
+  assert.strictEqual('seriesAskTimeout' in plugin.Config({}), false)
   assert.ok(!messages.usage.includes('\u8fde' + '\u7eed'))
   assert.strictEqual(messages[removedMessageKey], undefined)
   assert.ok(!source.includes('handleGenerate' + 'Series'))
@@ -566,4 +566,40 @@ test('diagnoseText reports custom workflow node IDs without contacting ComfyUI',
   } finally {
     Object.assign(cfg, saved)
   }
+})
+
+// ---------------- 配置分组（控制台折叠） ----------------
+
+test('config is grouped into collapsible sections while staying flat', () => {
+  const schema = plugin.Config
+
+  // 用 Schema.intersect 做分组
+  assert.strictEqual(schema.type, 'intersect')
+  assert.ok(Array.isArray(schema.list))
+  assert.ok(schema.list.length >= 10, '应该切出足够多的分组')
+
+  // 每个分组都要有标题，否则控制台里认不出来
+  for (const branch of schema.list) {
+    assert.ok(branch.meta.description, '存在没有标题的分组')
+  }
+
+  // 进阶分组默认折叠，常用分组默认展开
+  assert.ok(schema.list.filter(b => b.meta.collapse).length >= 3, '进阶分组应默认折叠')
+  assert.ok(schema.list.some(b => !b.meta.collapse), '常用分组应默认展开')
+
+  // 关键：解析结果必须仍是扁平对象，不能多出「分组」这一层
+  const resolved = schema({})
+  for (const key of ['comfyuiBaseUrl', 'unetName', 'cfg', 'qualityPrefix', 'negativePrompt',
+    'customWorkflowEnabled', 'positivePromptNodeId', 'price', 'queueEnabled', 'adminOnly', 'outputLogs']) {
+    assert.ok(key in resolved, '缺少配置项 ' + key)
+  }
+  assert.strictEqual(typeof resolved.cfg, 'number')
+  // 分组标题不应成为配置键
+  assert.ok(!('① ComfyUI 连接' in resolved))
+
+  // 旧 koishi.yml 的扁平写法必须继续被接受（零迁移）
+  const oldStyle = schema({ unetName: 'legacy.safetensors', cfg: 4.5, qualityPrefix: 'masterpiece' })
+  assert.strictEqual(oldStyle.unetName, 'legacy.safetensors')
+  assert.strictEqual(oldStyle.cfg, 4.5)
+  assert.strictEqual(oldStyle.qualityPrefix, 'masterpiece')
 })

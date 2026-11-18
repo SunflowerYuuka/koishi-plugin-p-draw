@@ -64,34 +64,116 @@ plugins:
 
 ## 配置说明
 
+控制台里配置分成 **12 个可折叠小节**：①–⑥ 常用项默认展开，⑦–⑫ 进阶项默认折叠。`koishi.yml` 里的键仍然是**扁平**的（见文末示例），分组只影响界面显示，旧配置无需迁移。
+
+### ① ComfyUI 连接
+
 | 项 | 说明 |
 |----|------|
 | `comfyuiBaseUrl` | ComfyUI API 地址（默认 `http://127.0.0.1:8188`） |
-| `unetName` / `clipName` / `vaeName` | 模型文件名，需与 ComfyUI 下拉框中的文件名一致 |
-| `useGgufUnet` | 主模型加载方式：`auto`（按文件名后缀判断，默认）/ `true`（强制 `UnetLoaderGGUF`，需装 ComfyUI-GGUF）/ `false`（强制 `UNETLoader`） |
-| `modelParams` | 每个模型独立参数覆盖（字典）：`key`=模型文件名，`value`=要覆盖的 `samplerName` / `scheduler` / `steps` / `cfg` / `width` / `height`。让不同模型用各自最佳采样参数，只填需要覆盖的字段，不填的用全局默认。匹配不区分大小写与 -/_。优先级：命令级 `--steps`/`--cfg` > 模型级 `modelParams` > 全局配置 |
-| `customWorkflowEnabled` / `customWorkflowPath` | 使用自定义工作流 JSON；路径相对 Koishi 运行目录解析（插件目录作为回退） |
-| `customWorkflowReloadOnChange` | 工作流 JSON 变化时自动重载，无需重启插件（默认 `true`） |
-| `positivePromptNodeId` / `negativePromptNodeId` | 自定义工作流中正/负面提示词节点 ID；留空自动识别 |
-| `resolutionNodeId` / `seedNodeId` / `stepsNodeId` | 自定义工作流中尺寸 / 种子 / 步数节点 ID；可留空（留空则按节点类型批量覆盖） |
-| `skipQualityPrefixForCustomWorkflow` | 启用自定义工作流时自动跳过质量前缀注入（默认 `true`） |
+| `timeout` / `pollInterval` | 单次生成超时（秒，默认 300）、状态查询间隔（秒，默认 2） |
+
+### ② 模型与采样参数
+
+| 项 | 说明 |
+|----|------|
+| `unetName` / `clipName` / `vaeName` | 模型文件名，需与 ComfyUI 下拉框中的文件名完全一致 |
+| `useGgufUnet` | `auto`（按后缀判断，默认）/ `true`（强制 `UnetLoaderGGUF`，需装 ComfyUI-GGUF）/ `false`（强制 `UNETLoader`） |
 | `width` / `height` / `allowedSizes` | 默认尺寸与可用尺寸列表 |
-| `steps` / `cfg` / `samplerName` / `scheduler` | 采样参数 |
-| `qualityPrefix` / `negativePrompt` | 质量词前缀与负面提示词。默认 `qualityPrefix` 为空（Aesthetic 1.1 不需要质量标签），`negativePrompt` 为 Aesthetic 推荐值；从 Base 模型迁移时再把 `qualityPrefix` 填回 `masterpiece, best quality, score_7` |
-| `promptOptimizeEnabled` / `llmBaseUrl` / `llmApiKey` / `llmModel` | 自然语言优化（OpenAI 兼容接口） |
-| `promptOptimizeTemplate` | 自然语言优化模板（支持 `{theme}` `{search_block}` `{character_rule}` 占位符） |
-| `webSearchEnabled` / `tavilyApiKey` / `webSearchMaxResults` / `webSearchDepth` / `webSearchQueryTemplate` | 联网搜索（指令带 `联网`/`搜索` 触发，需 Tavily Key） |
-| `fixedCharacters` / `artistPresets` / `activeArtistPreset` / `styleTags` | 角色、画师组与画风 |
-| `queueEnabled` / `queueMaxRequests` | 生成队列 |
-| `couponPrice` / `couponAskTimeout` | 提示词优化券单价（P 点/张，默认 3000，可被 `data/p-shop.json` 覆盖）与交互确认等待时间（秒，默认 60） |
-| `batchMax` | 单次指令最多生成的张数（`x3` / `3张` / `--数量 3` 等写法），默认 4 |
-| `price` / `multiPrice` / `adminUsers` | 单张 / 多人单张消耗的 P 点与免单管理员 |
-| `multiVerifyEnabled` / `multiVerifyPassScore` / `multiCandidateCount` / `multiSendDegradedCandidate` | 多人视觉校验：合格分数、候选采样数、失败时是否降级发送 |
-| `verifyLlmBaseUrl` / `verifyLlmApiKey` / `verifyLlmModel` | 多人视觉校验用视觉模型（OpenAI 兼容，需支持图片输入；留空则跳过校验） |
-| `adminOnly` | 仅管理员可用（`adminUsers` 中的用户） |
-| `allowedUserIds` / `blockedUserIds` | 用户白名单 / 黑名单（QQ 号，黑名单优先） |
-| `allowedGroupIds` / `blockedGroupIds` | QQ 群白名单 / 黑名单（群号，黑名单优先） |
+| `steps` / `cfg` / `samplerName` / `scheduler` | 采样参数（Aesthetic 1.1 推荐 `30 / 4.0 / er_sde / simple`） |
+
+### ③ 提示词与画师
+
+| 项 | 说明 |
+|----|------|
+| `qualityPrefix` / `negativePrompt` | 质量词前缀与负面词。默认 `qualityPrefix` 为空（Aesthetic 1.1 不需要质量标签），`negativePrompt` 为 Aesthetic 推荐值；从 Base 模型迁移时再把前缀填回 `masterpiece, best quality, score_7` |
+| `styleTags` / `defaultArtistTags` | 画风 tags、备用画师 tags |
+| `activeArtistPreset` / `artistPresets` | 启用的画师组名称与画师组列表 |
+| `fixedCharacters` | 固定角色（仅兼容旧配置，运行时以数据库为准） |
+
+### ④ 队列与批量
+
+| 项 | 说明 |
+|----|------|
+| `queueEnabled` / `queueMaxRequests` | 生成队列开关与上限（0 表示不限制） |
+| `batchMax` | 单次指令最多生成的张数（`x3` / `3张` / `--数量 3`），默认 4 |
+
+### ⑤ P 点与优化券
+
+| 项 | 说明 |
+|----|------|
+| `price` / `multiPrice` | 单张 / 多人单张消耗的 P 点 |
+| `couponPrice` / `couponAskTimeout` | 提示词优化券单价（默认 3000，可被 `data/p-shop.json` 覆盖）与确认等待时间（秒） |
+| `adminUsers` | 免 P 点管理员用户 ID |
+
+### ⑥ 权限与日志
+
+| 项 | 说明 |
+|----|------|
+| `adminOnly` | 仅管理员可用 |
+| `allowedUserIds` / `blockedUserIds` | 用户白名单 / 黑名单（黑名单优先） |
+| `allowedGroupIds` / `blockedGroupIds` | 群白名单 / 黑名单（黑名单优先） |
 | `outputLogs` | 是否输出详细日志 |
+
+### ⑦ 自定义工作流（折叠）
+
+| 项 | 说明 |
+|----|------|
+| `customWorkflowEnabled` / `customWorkflowPath` | 启用自定义工作流 JSON；路径相对 Koishi 运行目录解析 |
+| `skipQualityPrefixForCustomWorkflow` | 启用自定义工作流时跳过质量前缀注入（默认 `true`） |
+| `customWorkflowOverrideParameters` | 用插件参数覆盖工作流内的采样参数 |
+| `customWorkflowReloadOnChange` | 工作流文件变化时自动重载，无需重启（默认 `true`） |
+| `positivePromptNodeId` / `negativePromptNodeId` | 正/负面提示词节点 ID；留空自动识别 |
+| `resolutionNodeId` / `seedNodeId` / `stepsNodeId` | 尺寸 / 种子 / 步数节点 ID；可留空（留空则按节点类型覆盖） |
+
+### ⑧ 模型独立参数覆盖（折叠）
+
+| 项 | 说明 |
+|----|------|
+| `modelParams` | 字典：`key`=模型文件名，`value` 只填要覆盖的 `samplerName` / `scheduler` / `steps` / `cfg` / `width` / `height`。匹配不区分大小写与 `-` `_`。优先级：命令级 `--steps`/`--cfg` > 本节 > 全局配置 |
+
+### ⑨ 提示词优化 / LLM（折叠）
+
+| 项 | 说明 |
+|----|------|
+| `promptOptimizeEnabled` / `llmBaseUrl` / `llmApiKey` / `llmModel` | 自然语言优化（OpenAI 兼容接口） |
+| `llmMaxTokens` | LLM 输出上限 |
+| `promptOptimizeTemplate` | 优化模板（支持 `{theme}` `{search_block}` `{character_rule}` 占位符） |
+
+### ⑩ 联网搜索（折叠）
+
+| 项 | 说明 |
+|----|------|
+| `webSearchEnabled` / `tavilyApiKey` | 联网搜索开关与 Tavily Key |
+| `webSearchMaxResults` / `webSearchDepth` / `webSearchQueryTemplate` | 结果数量、搜索深度、搜索词模板 |
+
+### ⑪ 多人视觉校验（折叠）
+
+| 项 | 说明 |
+|----|------|
+| `multiVerifyEnabled` / `multiVerifyPassScore` | 校验开关与合格分数（0-10） |
+| `multiCandidateCount` / `multiSendDegradedCandidate` | 候选采样数与全部不达标时是否仍发送最优候选 |
+| `verifyLlmBaseUrl` / `verifyLlmApiKey` / `verifyLlmModel` | 视觉模型（需支持图片输入；留空则跳过校验） |
+
+### ⑫ 兼容项（折叠）
+
+| 项 | 说明 |
+|----|------|
+| `workflow` | 旧版工作流标识，仅用于状态/诊断显示，内置工作流固定 `anima_t2i` |
+
+`koishi.yml` 里仍是扁平写法（分组不影响它）：
+
+```yaml
+p-draw:0z81el:
+  comfyuiBaseUrl: http://127.0.0.1:8188
+  unetName: anima-aesthetic-v1.1.safetensors
+  qualityPrefix: ''
+  cfg: 4.0
+  steps: 30
+  # 进阶项同样扁平，例如：
+  # customWorkflowEnabled: true
+  # customWorkflowPath: data/p-draw/workflows/anima-aesthetic-v1.1.json
+```
 
 ## 工作流对接：Anima Aesthetic 1.1
 
