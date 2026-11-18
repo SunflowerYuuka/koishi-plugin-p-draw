@@ -50,7 +50,7 @@ const CONFIG_GROUPS = {
     'activeArtistPreset', 'artistPresets', 'fixedCharacters',
   ],
   queue: ['queueEnabled', 'queueMaxRequests', 'batchMax'],
-  pricing: ['price', 'multiPrice', 'couponPrice', 'couponAskTimeout', 'adminUsers'],
+  pricing: ['price', 'multiPrice', 'couponPrice', 'couponAskTimeout', 'workflowConfirm', 'workflowConfirmTimeout', 'adminUsers'],
   access: ['adminOnly', 'allowedUserIds', 'blockedUserIds', 'allowedGroupIds', 'blockedGroupIds', 'outputLogs'],
   workflow: [
     'customWorkflowEnabled', 'customWorkflowPath', 'skipQualityPrefixForCustomWorkflow',
@@ -151,6 +151,8 @@ exports.Config = Schema.object({
     multiPrice: Schema.number().default(900).description('多人指令单张消耗的 P 点'),
     couponPrice: Schema.number().default(3000).description('提示词优化券单价（可被 data/p-shop.json 覆盖）'),
     couponAskTimeout: Schema.number().default(60).description('优化券确认等待时间（秒）'),
+  workflowConfirm: Schema.boolean().default(true).description('画图前先报点数明细并等用户确认（默认开）'),
+  workflowConfirmTimeout: Schema.number().default(60).description('点数确认的等待时间（秒）'),
     adminUsers: Schema.array(Schema.string()).default([]).description('免 P 点管理员用户 ID'),
   }).description('⑤ P 点与优化券').collapse(),
 
@@ -192,6 +194,7 @@ exports.Config = Schema.object({
       denoise: Schema.number().description('图生图的重绘幅度 0–1（1=整张重绘）。只对需要图片输入的工作流有意义'),
       imageNodeId: Schema.string().description('图片输入节点 ID（LoadImage）。留空则自动使用工作流里的图片节点'),
       price: Schema.number().description('该预设每张消耗的 P 点（留空沿用全局 price / multiPrice）'),
+      warning: Schema.string().description('该预设被使用时报给用户的提醒（留空不提醒），例如换背景类的能力边界说明'),
       overrideModel: Schema.boolean().description('是否把 unetName 写进这个工作流的模型节点（留空沿用全局）'),
       modelLoaderNodeId: Schema.string().description('该预设的模型加载节点 ID（留空沿用全局）'),
     }).description('预设')).default({}).description('工作流预设：key=预设名。指令里用 `--工作流 <名称>` 或名称/别名开头选择（如 `画图 极速：1girl`）'),
@@ -2356,6 +2359,26 @@ exports.apply = async function apply(ctx, rawConfig) {
     const userPrompt = promptSections.positive
     const userNegativePrompt = promptSections.negative
     if (!userPrompt) return session.text('.no-prompt')
+
+    // 点数确认：先报明细（多少点、来自哪个工作流），用户同意再画。
+    // 管理员免扣费，没有需要确认的花费，直接放过。
+    if (cfg.workflowConfirm && !isAdmin && typeof session.prompt === 'function') {
+      const totalCost = count * unitPrice
+      const presetName = activePreset ? activePreset.name : '内置默认工作流'
+      const lines = [
+        `本次任务需要 ${totalCost} P 点`,
+        `· 工作流：${presetName}（${unitPrice} P/张 × ${count} 张）`,
+      ]
+      if (imagePlan.files.length) lines.push(`· 参考图：${imagePlan.files.length} 张（已上传）`)
+      const presetWarning = activePreset ? String(activePreset.warning || '').trim() : ''
+      if (presetWarning) lines.push(`· 提醒：${presetWarning}`)
+      lines.push('', `回复「是」开始绘制，回复「否」取消（${cfg.workflowConfirmTimeout} 秒内）`)
+      await session.send(lines.join('\n'))
+      const reply = await session.prompt(cfg.workflowConfirmTimeout * 1000).catch(() => null)
+      if (normalizeConfirm(reply) !== true) {
+        return session.text('.workflow-confirm-cancelled')
+      }
+    }
 
     // ComfyUI 就绪
     const ready = await ensureComfyuiReady()

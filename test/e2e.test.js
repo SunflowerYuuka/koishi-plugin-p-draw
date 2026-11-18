@@ -544,3 +544,90 @@ test('end-to-end: an image-input preset refuses politely when no image is attach
     if (savedWebSocket) globalThis.WebSocket = savedWebSocket
   }
 })
+
+// ---------------- 画图前点数确认 ----------------
+
+function makeConfirmCtx(baseDir, userId, reply) {
+  const { ctx, actions } = makeCtx(baseDir, { p_system: [{ userid: userId, p: 5000 }] })
+  const sent = []
+  const session = {
+    userId,
+    platform: 'onebot',
+    messageId: 'm' + userId,
+    event: { message: { id: 'm' + userId } },
+    text: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''),
+    send: async (msg) => { sent.push(String(msg)) },
+    prompt: async () => reply,
+  }
+  return { ctx, actions, sent, session }
+}
+
+function presetWithPrice() {
+  return {
+    精修: {
+      path: 'data/p-draw/workflows/preset-basic.json',
+      aliases: ['repair'],
+      price: 2500,
+      warning: '该工作流对主体分离能力有限，可能与主体相连的部分一并保留。',
+    },
+  }
+}
+
+test('end-to-end: the points breakdown is shown and a decline aborts before charging', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+  const { state, server } = startStubComfy()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  try {
+    const baseDir = tmpDir('pdrawtest-confirm-no-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    fs.writeFileSync(path.join(wfDir, 'preset-basic.json'), JSON.stringify(aestheticGraph()))
+
+    const { ctx, actions, sent, session } = makeConfirmCtx(baseDir, '50001', '否')
+    const plugin = require('../index.js')
+    await plugin.apply(ctx, Object.assign(makeCfg(port), { adminUsers: [], workflowPresets: presetWithPrice(), workflowConfirm: true, workflowConfirmTimeout: 5 }))
+
+    const reply = await actions[0]({ session }, 'repair：1girl, solo')
+    const asked = sent.join('\n')
+    assert.ok(asked.includes('2500'), '应报出总点数：' + asked)
+    assert.ok(asked.includes('精修'), '应说明点数来自哪个工作流：' + asked)
+    assert.ok(asked.includes('提醒'), '预设带 warning 时应给出提醒：' + asked)
+    assert.ok(asked.includes('主体分离'), '提醒内容应被展示')
+    assert.strictEqual(reply, '.workflow-confirm-cancelled')
+    assert.strictEqual(state.captured, null, '拒绝后不应提交 ComfyUI')
+    const user = ctx.tables.p_system.find(u => u.userid === '50001')
+    assert.strictEqual(user.p, 5000, '拒绝后不应扣点')
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})
+
+test('end-to-end: confirming the breakdown proceeds and charges exactly the quoted price', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+  const { state, server } = startStubComfy()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  try {
+    const baseDir = tmpDir('pdrawtest-confirm-yes-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    fs.writeFileSync(path.join(wfDir, 'preset-basic.json'), JSON.stringify(aestheticGraph()))
+
+    const { ctx, actions, sent, session } = makeConfirmCtx(baseDir, '50002', '是')
+    const plugin = require('../index.js')
+    await plugin.apply(ctx, Object.assign(makeCfg(port), { adminUsers: [], workflowPresets: presetWithPrice(), workflowConfirm: true, workflowConfirmTimeout: 5 }))
+
+    const reply = await actions[0]({ session }, 'repair：1girl, solo')
+    assert.notStrictEqual(reply, '.workflow-confirm-cancelled')
+    assert.ok(state.captured, '确认后应提交 ComfyUI')
+    const user = ctx.tables.p_system.find(u => u.userid === '50002')
+    assert.strictEqual(user.p, 2500, `应按报价 2500 扣费，实得余额 ${user.p}`)
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})

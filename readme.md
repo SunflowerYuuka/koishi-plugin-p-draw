@@ -106,6 +106,7 @@ plugins:
 |----|------|
 | `price` / `multiPrice` | 单张 / 多人单张消耗的 P 点 |
 | `couponPrice` / `couponAskTimeout` | 提示词优化券单价（默认 3000，可被 `data/p-shop.json` 覆盖）与确认等待时间（秒） |
+| `workflowConfirm` / `workflowConfirmTimeout` | 画图前先报点数明细并等用户确认（默认 `true` / 60 秒）。管理员免扣费不询问；平台不支持交互时自动跳过 |
 | `adminUsers` | 免 P 点管理员用户 ID |
 
 ### ⑥ 权限与日志
@@ -417,6 +418,11 @@ workflowPresets:
     aliases: [基础, base]           # 指令别名（可选）
     positivePromptNodeId: '6'       # 节点 ID 可留空，插件会自动识别
     negativePromptNodeId: '7'
+  换背景:
+    path: data/p-draw/workflows/12-new-scene.json
+    aliases: [换背景, scene]
+    price: 1400
+    warning: 该工作流对主体分离能力有限，可能与主体相连的部分一并保留；如效果不理想，建议更换构图或参考图后重试。
   极速4步:
     path: data/p-draw/workflows/03-dmdx.json
     aliases: [极速, fast]
@@ -425,6 +431,23 @@ workflowPresets:
     overrideParameters: true
 defaultWorkflowPreset: 基础文生图
 ```
+
+### 画图前点数确认
+
+默认开启（`workflowConfirm`）。每次画图前会先发一条明细，等用户回复「是」才真正开始，回复「否」或超时都不扣点：
+
+```
+本次任务需要 1800 P 点
+· 工作流：精修（1800 P/张 × 1 张）
+· 参考图：1 张（已上传）
+· 提醒：该工作流对主体分离能力有限，可能与主体相连的部分一并保留；如效果不理想，建议更换构图或参考图后重试。
+
+回复「是」开始绘制，回复「否」取消（60 秒内）
+```
+
+- 管理员免扣费，不会询问
+- 平台不支持交互确认时自动跳过
+- 「提醒」那一行来自预设的 `warning` 字段，留空就不显示。换背景类工作流建议填一条通用说明（不要把具体画面元素写死）
 
 ### 指令用法
 
