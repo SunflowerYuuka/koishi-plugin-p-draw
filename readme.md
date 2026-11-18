@@ -453,11 +453,11 @@ defaultWorkflowPreset: 基础文生图
 | 03 | DMDX 4-Step Speed Run | 19 | 文本 | ⏳ 需 DMDX LoRA（`dmdx_student_final_comfy.safetensors`） |
 | 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（已转好并实测） |
 | 01 | 1.5x Upscale | 20 | 文本 | ✅ 可用（见下方依赖） |
-| 05 | Tiled Upscale | 45 | 视导出而定 | ⚠️ 同上 |
+| 05 | Tiled Upscale | 45 | 图片 | ⚠️ 分块节点的 schema 映射待处理 |
 | 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ✅ 可用（已裁成单输出；ControlNet 分支默认旁路，需检测器 + SAM 模型） |
 | 02 | ControlNet Precision Control | 32 | 图片 | ❌ 需图生图 |
-| 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ❌ 需图生图 |
-| 07 | Image-to-Image | 19 | 图片 | ❌ 需图生图 |
+| 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ✅ 可用（已裁成单输出；WD14 打标器已剔除，重绘幅度建议 0.4–0.6） |
+| 07 | Image-to-Image | 19 | 图片 | ⏳ 缺 `Qwen3VLProcessor`（自动打标节点，计划剔除后启用） |
 | 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 需图生图 |
 
 判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。

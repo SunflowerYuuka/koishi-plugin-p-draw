@@ -67,23 +67,26 @@ function resolveSource(map, target, seen = new Set()) {
   }
 
   // bypass 透传："nodeId:outSlot" -> [源节点, 源slot]
+  // Reroute 是前端专用的「直通」节点，API 里不存在，必须和 bypass 一样透传
+  const PASS_THROUGH_TYPES = new Set(['Reroute', 'Reroute (rgthree)', 'PrimitiveNode'])
+  const isPassThrough = (node) => node.mode === 4 || PASS_THROUGH_TYPES.has(String(node.type || ''))
   const bypassMap = new Map()
   for (const node of nodes) {
-    if (node.mode !== 4) continue
+    if (!isPassThrough(node)) continue
     const m = srcByName.get(String(node.id)) || {}
     const outs = node.outputs || []
     outs.forEach((out, outSlot) => {
       const matchName = Object.keys(m).find((name) => {
         const inpDef = (node.inputs || []).find(i => i.name === name)
-        return inpDef && inpDef.type === out.type
-      })
+        return inpDef && (inpDef.type === out.type || inpDef.type === '*' || out.type === '*')
+      }) || Object.keys(m)[0]
       if (matchName) bypassMap.set(`${node.id}:${outSlot}`, m[matchName])
     })
   }
 
   const api = {}
   for (const node of nodes) {
-    if (node.mode === 4) continue
+    if (isPassThrough(node)) continue
     const def = oi[node.type]
     if (!def) { console.log(`!! 未知节点 ${node.type} #${node.id}`); continue }
     const ordered = [
