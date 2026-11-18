@@ -491,6 +491,11 @@ defaultWorkflowPreset: 基础文生图
 > 人物分割（`segm/person_yolov8m-seg.pt`）→ 合并蒙版 → 反相得背景蒙版 → 收缩 8px + 羽化 12px → `InpaintModelConditioning` 只重绘背景。
 > 人物像素完全保留，背景按提示词全新生成。串联两个工作流会二次编解码掉画质，且白白多跑一遍。
 >
+> **换个完全不同的场景？用 `12-new-scene.json`（人物抠图 + 新场景合成）**：
+> 人物分割 → 蒙版 → 把人物缩放到生成尺寸 → 另起一段纯文生图生成新场景 → `ImageCompositeMasked` 贴进去 → 再走一遍 `denoise 0.35` 融合光影。
+> 和 11 的分工：**11 保留原构图只换背景（同一地点换氛围），12 把人物搬到全新场景（换地点）**。
+> ⚠️ 已知限制：`person_yolov8m-seg` 会把人物和她相连的前景结构（例图里的石栏杆）当成一个整体，自动分割**分不开**；SAM 精修反而贴得更紧。要完全干净需要用户提供蒙版。
+>
 > **参数要点（实测踩过）**：`GrowMask` 的 `expand` 必须是**正值**（向人物内侧扩张）。用负值会在人物外圈留一圈原图 → 明显光晕。默认 `+10`，配合 `FeatherMask 8`。`SegmDetectorSEGS` 的 `dilation` 别开太大（10 会让人物蒙版往下渗、把前景结构一起保护住），默认 `6`。
 
 > `XB_UNetNameBroadcaster`（在 XB_ToolBox 里）依赖极重（easyocr / whisper / diffusers…），**不建议装**。它只是给模型加载节点传一个字符串，删掉该节点、直接在加载节点的下拉框里选模型即可。
