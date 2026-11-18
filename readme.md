@@ -458,7 +458,7 @@ defaultWorkflowPreset: 基础文生图
 | 02 | ControlNet Precision Control | 32 | 图片 | ✅ 可用（**VACE 深度控制**，需带参考图；依赖见下） |
 | 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ✅ 可用（已裁成单输出；WD14 打标器已剔除，重绘幅度建议 0.4–0.6） |
 | 07 | Image-to-Image | 19 | 图片 | ✅ 可用（已裁成单输出；`Qwen3VLProcessor` 已剔除，需配 `denoise`） |
-| 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 缺 8 个 AILab 系节点（Cosmos-Reference / RMBG / JPS 等） |
+| 10 | Anima-Edit LoRA / IC | 52 | 图片 | ✅ 可用（**参考图编辑**：改服装/细节、保角色；背景基本沿用原图） |
 
 判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。
 
@@ -479,6 +479,13 @@ defaultWorkflowPreset: 基础文生图
 > 2. 深度源用 `DepthAnythingV2Preprocessor`，**必须显式指定** `ckpt_name`，否则默认下 1.3GB 的 Large 模型
 > 3. **正/负面条件必须从 `CLIPTextEncode` 直连采样器**，只取 `ACN_AdvancedControlNetApply` 的第 3 个输出（MODEL）。若把条件也走 ACN 的输出，等于双重注入，画面会严重过曝发白
 > 4. `strength` 建议 0.8–0.9；`cfg≈3.0`、`beta57`、30 步
+
+> **10 的参考图编辑要点**（实测得出）：
+> 1. 需要 `ComfyUI-Cosmos-Reference`（`ApplyCosmosReferenceLatent`）+ **`AnimaEditV1.safetensors`（210MB）编辑 LoRA**。只装前者会出满图条纹伪影——LoRA 才是"如何理解参考图"的部分
+> 2. `ApplyCosmosReferenceLatent` 在 API 格式下的输入名是 `latent`（不是 `ref_latents`）
+> 3. 参考图**必须先缩放到与生成完全相同的尺寸**（用 `ImageScale`），否则报 `Expected size 152 but got size 144`
+> 4. ComfyUI 自带的 `ReferenceLatent`、Advanced-ControlNet 的 `ACN_ReferenceControlNet` 对 Anima **全部静默失效**（像素与无参考图完全一致），不要用
+> 5. 能力边界：服装/发色/细节可改、角色可保留，但**背景场景会大幅沿用参考图**——想换场景用 02 或全新生成
 
 > `XB_UNetNameBroadcaster`（在 XB_ToolBox 里）依赖极重（easyocr / whisper / diffusers…），**不建议装**。它只是给模型加载节点传一个字符串，删掉该节点、直接在加载节点的下拉框里选模型即可。
 
