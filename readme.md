@@ -455,7 +455,7 @@ defaultWorkflowPreset: 基础文生图
 | 01 | 1.5x Upscale | 20 | 文本 | ✅ 可用（见下方依赖） |
 | 05 | Tiled Upscale | 45 | 图片 | ⏳ 已转好，需 `4x_NMKD-Siax_200k.pth`（放 `models/upscale_models`） |
 | 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ✅ 可用（已裁成单输出；ControlNet 分支默认旁路，需检测器 + SAM 模型） |
-| 02 | ControlNet Precision Control | 32 | 图片 | ❌ 需图生图 |
+| 02 | ControlNet Precision Control | 32 | 图片 | ✅ 可用（**VACE 深度控制**，需带参考图；依赖见下） |
 | 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ✅ 可用（已裁成单输出；WD14 打标器已剔除，重绘幅度建议 0.4–0.6） |
 | 07 | Image-to-Image | 19 | 图片 | ✅ 可用（已裁成单输出；`Qwen3VLProcessor` 已剔除，需配 `denoise`） |
 | 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 需图生图 |
@@ -472,6 +472,13 @@ defaultWorkflowPreset: 基础文生图
 | [Comfy-WaveSpeed](https://github.com/chengzeyi/Comfy-WaveSpeed) | `EnhancedLoadDiffusionModel` | 官方图的模型加载节点 |
 | [ControlAltAI-Nodes](https://github.com/gseth/ControlAltAI-Nodes) | `FluxResolutionNode` | 按兆像素/比例计算尺寸 |
 | [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) | `Seed (rgthree)` | 08 等图的种子节点 |
+| [ComfyUI-Advanced-ControlNet-Anima](https://github.com/TaihoC/ComfyUI-Advanced-ControlNet-Anima)（`feat/anima-vace-controlnet` 分支） | `ACN_ControlNetLoaderAdvanced` / `ACN_AdvancedControlNetApply` | 02 的 VACE 深度控制 |
+
+> **02 的 VACE 深度控制要点**（实测得出，容易踩坑）：
+> 1. 权重：`TaihoC/Anima-ControlNet-VACE-Depth` 的 `anima-vace-depth.safetensors`（568MB）放 `models/controlnet`
+> 2. 深度源用 `DepthAnythingV2Preprocessor`，**必须显式指定** `ckpt_name`，否则默认下 1.3GB 的 Large 模型
+> 3. **正/负面条件必须从 `CLIPTextEncode` 直连采样器**，只取 `ACN_AdvancedControlNetApply` 的第 3 个输出（MODEL）。若把条件也走 ACN 的输出，等于双重注入，画面会严重过曝发白
+> 4. `strength` 建议 0.8–0.9；`cfg≈3.0`、`beta57`、30 步
 
 > `XB_UNetNameBroadcaster`（在 XB_ToolBox 里）依赖极重（easyocr / whisper / diffusers…），**不建议装**。它只是给模型加载节点传一个字符串，删掉该节点、直接在加载节点的下拉框里选模型即可。
 
