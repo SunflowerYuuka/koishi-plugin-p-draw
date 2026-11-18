@@ -906,3 +906,96 @@ test('inspectWorkflowFile reports availability without throwing', () => {
   assert.strictEqual(missing.ok, false)
   assert.ok(missing.error.includes('不存在'))
 })
+
+// ---------------- 模型名注入 ----------------
+
+test('findModelLoaders recognises the model loader variants', () => {
+  const graph = {
+    1: { class_type: 'UNETLoader', inputs: { unet_name: 'a.safetensors', weight_dtype: 'default' } },
+    2: { class_type: 'UnetLoaderGGUF', inputs: { unet_name: 'b.gguf' } },
+    3: { class_type: 'EnhancedLoadDiffusionModel', inputs: { unet_name: 'c.safetensors', weight_dtype: 'default' } },
+    4: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'd.safetensors' } },
+    5: { class_type: 'CLIPLoader', inputs: { clip_name: 'clip.safetensors' } },
+  }
+  const loaders = wf.findModelLoaders(graph)
+  assert.deepStrictEqual(loaders.map(l => `${l.id}:${l.inputName}`), ['1:unet_name', '2:unet_name', '3:unet_name', '4:ckpt_name'])
+})
+
+test('applyModelOverride injects into a single loader and skips ambiguity', () => {
+  const single = { 1: { class_type: 'EnhancedLoadDiffusionModel', inputs: { unet_name: 'old.safetensors', weight_dtype: 'default' } } }
+  const r1 = wf.applyModelOverride(single, { unetName: 'mine.safetensors' }, { overrideModel: true })
+  assert.strictEqual(r1.applied, true)
+  assert.strictEqual(single[1].inputs.unet_name, 'mine.safetensors')
+
+  // 两个加载器：不猜
+  const multi = {
+    1: { class_type: 'UNETLoader', inputs: { unet_name: 'a.safetensors' } },
+    2: { class_type: 'UNETLoader', inputs: { unet_name: 'b.safetensors' } },
+  }
+  const r2 = wf.applyModelOverride(multi, { unetName: 'mine.safetensors' }, { overrideModel: true })
+  assert.strictEqual(r2.applied, false)
+  assert.strictEqual(r2.reason, 'ambiguous')
+  assert.strictEqual(multi[1].inputs.unet_name, 'a.safetensors')
+  assert.strictEqual(multi[2].inputs.unet_name, 'b.safetensors')
+
+  // 指定节点后只改那一个
+  const r3 = wf.applyModelOverride(multi, { unetName: 'mine.safetensors' }, { overrideModel: true, modelLoaderNodeId: '2' })
+  assert.strictEqual(r3.applied, true)
+  assert.strictEqual(multi[1].inputs.unet_name, 'a.safetensors')
+  assert.strictEqual(multi[2].inputs.unet_name, 'mine.safetensors')
+
+  // 关掉开关就不动
+  const single2 = { 1: { class_type: 'UNETLoader', inputs: { unet_name: 'keep.safetensors' } } }
+  const r4 = wf.applyModelOverride(single2, { unetName: 'mine.safetensors' }, { overrideModel: false })
+  assert.strictEqual(r4.applied, false)
+  assert.strictEqual(single2[1].inputs.unet_name, 'keep.safetensors')
+})
+
+test('customWorkflow injects the configured model by default', () => {
+  const graph = baselineGraph()
+  graph['44'].inputs.unet_name = 'json-model.safetensors'
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'wf.json', graph)
+  wf.clearWorkflowCache()
+
+  const w = wf.customWorkflow(
+    baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file, unetName: 'cfg-model.safetensors' }),
+    'P', 'N', 832, 1216, 30, 4, 1, false, { overrideModel: true },
+  )
+  assert.strictEqual(w['44'].inputs.unet_name, 'cfg-model.safetensors', 'unetName 应覆盖 JSON 里的模型')
+
+  // 关闭时不覆盖
+  wf.clearWorkflowCache()
+  const w2 = wf.customWorkflow(
+    baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file, unetName: 'cfg-model.safetensors' }),
+    'P', 'N', 832, 1216, 30, 4, 1, false, { overrideModel: false },
+  )
+  assert.strictEqual(w2['44'].inputs.unet_name, 'json-model.safetensors')
+})
+
+test('ClownsharKSampler_Beta and other samplers are recognised for prompt/steps/seed', () => {
+  // 官方 Anima 工作流用的是 ClownsharKSampler_Beta（RES4LYF），不是 KSampler
+  const graph = {
+    1: { class_type: 'EnhancedLoadDiffusionModel', inputs: { unet_name: 'm.safetensors', weight_dtype: 'default' } },
+    3: { class_type: 'CLIPLoader', inputs: { clip_name: 'c.safetensors', type: 'qwen_image', device: 'default' } },
+    5: { class_type: 'CLIPTextEncode', inputs: { text: 'p', clip: ['3', 0] } },
+    6: { class_type: 'CLIPTextEncode', inputs: { text: 'n', clip: ['3', 0] } },
+    7: { class_type: 'EmptyLatentImage', inputs: { width: 1024, height: 1024, batch_size: 1 } },
+    32: {
+      class_type: 'ClownsharKSampler_Beta',
+      inputs: {
+        model: ['1', 0], positive: ['5', 0], negative: ['6', 0], latent_image: ['7', 0],
+        steps: 34, cfg: 4.5, sampler_name: 'linear/euler', scheduler: 'beta57', seed: 1, denoise: 1,
+      },
+    },
+    9: { class_type: 'SaveImage', inputs: { images: ['32', 0] } },
+  }
+
+  const targets = wf.resolveCustomNodeTargets(graph, {})
+  assert.deepStrictEqual(targets.errors, [])
+  assert.deepStrictEqual(targets.positive, ['5'], '应从 ClownsharK 的 positive 反查到文本节点')
+  assert.deepStrictEqual(targets.negative, ['6'])
+  assert.deepStrictEqual(targets.stepsIds, ['32'], 'ClownsharKSampler_Beta 应算采样节点')
+  assert.deepStrictEqual(targets.seedIds, ['32'])
+  assert.deepStrictEqual(wf.findModelLoaders(graph).map(l => l.id), ['1'])
+})

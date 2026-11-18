@@ -125,6 +125,8 @@ plugins:
 | `skipQualityPrefixForCustomWorkflow` | 启用自定义工作流时跳过质量前缀注入（默认 `true`） |
 | `customWorkflowOverrideParameters` | 用插件参数覆盖工作流内的采样参数（总开关）。注意：`modelParams` 里显式写了的字段不受这个开关限制，永远覆盖 |
 | `customWorkflowReloadOnChange` | 工作流文件变化时自动重载，无需重启（默认 `true`） |
+| `workflowOverrideModel` | 用 `unetName` 覆盖自定义工作流里的模型文件名（默认 `true`）。开着之后 `p-draw 模型 <名称>` 对预设也生效，不用改 JSON |
+| `modelLoaderNodeId` | 指定覆盖哪个模型加载节点。留空时：工作流里只有一个模型加载节点就自动覆盖，有多个则不猜、跳过 |
 | `positivePromptNodeId` / `negativePromptNodeId` | 正/负面提示词节点 ID；留空自动识别 |
 | `resolutionNodeId` / `seedNodeId` / `stepsNodeId` | 尺寸 / 种子 / 步数节点 ID；可留空（留空则按节点类型覆盖） |
 | `workflowPresets` | 工作流预设字典：`预设名 → { path, aliases, 节点 ID, steps, cfg, ... }`，供指令按名切换（见下方「工作流预设」） |
@@ -432,7 +434,7 @@ defaultWorkflowPreset: 基础文生图
 | 09 | Text-to-Image Baseline | 17 | 文本 | ✅ 可用 |
 | 03 | DMDX 4-Step Speed Run | 19 | 文本 | ✅ 可用（设 `steps: 4`、低 CFG） |
 | 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（多段采样+放大） |
-| 01 | 1.5x Upscale | 20 | 视导出而定 | ⚠️ 若含 `LoadImage` 则不可用 |
+| 01 | 1.5x Upscale | 20 | 文本 | ✅ 可用（见下方依赖） |
 | 05 | Tiled Upscale | 45 | 视导出而定 | ⚠️ 同上 |
 | 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ⚠️ ControlNet 分支需参考图，禁用后方可用 |
 | 02 | ControlNet Precision Control | 32 | 图片 | ❌ 需图生图 |
@@ -440,7 +442,22 @@ defaultWorkflowPreset: 基础文生图
 | 07 | Image-to-Image | 19 | 图片 | ❌ 需图生图 |
 | 10 | Anima-Edit LoRA / IC | 52 | 图片 | ❌ 需图生图 |
 
-判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 01/05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。
+判断依据是自动体检的结果：**只要 JSON 里出现 `LoadImage` 一类节点，就判定为需要图片输入**。所以 05/08 到底能不能用，取决于你导出时是「从空 latent 开始」还是「从图开始」——`画图 工作流` 会直接告诉你。
+
+### 官方工作流需要先装的自定义节点
+
+官方这套工作流依赖几个 ComfyUI 自定义节点包，**不装的话图里会显示红色缺失节点**：
+
+| 节点包 | 提供 | 用于 |
+|---|---|---|
+| [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) | `ClownsharKSampler_Beta` | 几乎所有官方工作流的主力采样器（`beta57` 等调度器） |
+| [Comfy-WaveSpeed](https://github.com/chengzeyi/Comfy-WaveSpeed) | `EnhancedLoadDiffusionModel` | 官方图的模型加载节点 |
+| [ControlAltAI-Nodes](https://github.com/gseth/ControlAltAI-Nodes) | `FluxResolutionNode` | 按兆像素/比例计算尺寸 |
+| [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) | `Seed (rgthree)` | 08 等图的种子节点 |
+
+> `XB_UNetNameBroadcaster`（在 XB_ToolBox 里）依赖极重（easyocr / whisper / diffusers…），**不建议装**。它只是给模型加载节点传一个字符串，删掉该节点、直接在加载节点的下拉框里选模型即可。
+
+01 实测流程：装上 RES4LYF + Comfy-WaveSpeed + ControlAltAI-Nodes，删掉 `XB_UNetNameBroadcaster`，把模型选成自己的，导出 API 即可。**插件会自动把 `unetName` 注入模型节点**（见 `workflowOverrideModel`），所以后续换模型不用再改 JSON。
 
 图生图能力（图片上传 + `LoadImage` 注入 + 重绘幅度）尚未实现，所以 ❌ 的四个目前只能等后续版本。
 

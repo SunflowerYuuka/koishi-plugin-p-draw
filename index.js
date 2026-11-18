@@ -55,6 +55,7 @@ const CONFIG_GROUPS = {
   workflow: [
     'customWorkflowEnabled', 'customWorkflowPath', 'skipQualityPrefixForCustomWorkflow',
     'customWorkflowOverrideParameters', 'customWorkflowReloadOnChange',
+    'workflowOverrideModel', 'modelLoaderNodeId',
     'positivePromptNodeId', 'negativePromptNodeId', 'resolutionNodeId', 'seedNodeId', 'stepsNodeId',
     'workflowPresets', 'defaultWorkflowPreset',
   ],
@@ -168,6 +169,8 @@ exports.Config = Schema.object({
     skipQualityPrefixForCustomWorkflow: Schema.boolean().default(true).description('启用自定义工作流时跳过质量前缀注入'),
     customWorkflowOverrideParameters: Schema.boolean().default(false).description('用插件参数覆盖工作流内的采样参数'),
     customWorkflowReloadOnChange: Schema.boolean().default(true).description('工作流文件变化时自动重载（无需重启）'),
+    workflowOverrideModel: Schema.boolean().default(true).description('用 unetName 覆盖自定义工作流里的模型文件名（让 `p-draw 模型` 切换对预设也生效）'),
+    modelLoaderNodeId: Schema.string().default('').description('指定覆盖哪个模型加载节点 ID（留空：工作流里只有一个模型加载节点时自动覆盖；有多个时跳过不猜）'),
     positivePromptNodeId: Schema.string().default('').description('正面提示词节点 ID（留空自动识别；示例 6，以实际 JSON 为准）'),
     negativePromptNodeId: Schema.string().default('').description('负面提示词节点 ID（留空自动识别；示例 7）'),
     resolutionNodeId: Schema.string().default('').description('尺寸节点 ID（留空自动识别）'),
@@ -186,6 +189,8 @@ exports.Config = Schema.object({
       samplerName: Schema.string().description('该预设固定采样器'),
       scheduler: Schema.string().description('该预设固定调度器'),
       overrideParameters: Schema.boolean().description('用上面的参数覆盖工作流内取值'),
+      overrideModel: Schema.boolean().description('是否把 unetName 写进这个工作流的模型节点（留空沿用全局）'),
+      modelLoaderNodeId: Schema.string().description('该预设的模型加载节点 ID（留空沿用全局）'),
     }).description('预设')).default({}).description('工作流预设：key=预设名。指令里用 `--工作流 <名称>` 或名称/别名开头选择（如 `画图 极速：1girl`）'),
     defaultWorkflowPreset: Schema.string().default('').description('默认预设名（留空则用上面的 customWorkflow* 那套）'),
   }).description('⑦ 自定义工作流'),
@@ -355,7 +360,11 @@ exports.apply = async function apply(ctx, rawConfig) {
   }
 
   // 自定义工作流路径一律相对 Koishi 运行目录解析（见 lib/workflows.js）
-  const workflowOpts = () => ({ baseDir: ctx.baseDir || process.cwd() })
+  const workflowOpts = () => ({
+    baseDir: ctx.baseDir || process.cwd(),
+    overrideModel: cfg.workflowOverrideModel !== false,
+    modelLoaderNodeId: cfg.modelLoaderNodeId || '',
+  })
 
   // ---------------- 工作流预设 ----------------
   // 预设 = 一个 JSON 路径 + 可选的节点 ID / 采样参数覆盖，指令里按名字选用。
@@ -387,6 +396,10 @@ exports.apply = async function apply(ctx, rawConfig) {
         ? Boolean(preset.overrideParameters)
         : Boolean(cfg.customWorkflowOverrideParameters),
     }
+    if (preset.overrideModel !== undefined && preset.overrideModel !== null) {
+      patch.workflowOverrideModel = Boolean(preset.overrideModel)
+    }
+    if (preset.modelLoaderNodeId) patch.modelLoaderNodeId = String(preset.modelLoaderNodeId)
     return patch
   }
 
@@ -605,6 +618,18 @@ exports.apply = async function apply(ctx, rawConfig) {
     lines.push(`步数节点：${fmt(t.stepsIds)}（${how(cfg.stepsNodeId, t.stepsIds.length)}）`)
     lines.push(`种子节点：${fmt(t.seedIds)}（${how(cfg.seedNodeId, t.seedIds.length)}）`)
     lines.push(`识别的文本编码节点：${fmt(t.textNodes)}`)
+    const loaders = report.modelLoaders || []
+    if (loaders.length) {
+      const list = loaders.map(l => `#${l.id} ${l.classType}`).join('、')
+      const how = cfg.workflowOverrideModel === false
+        ? '不注入（workflowOverrideModel=false，模型由 JSON 决定）'
+        : loaders.length > 1
+          ? (String(cfg.modelLoaderNodeId || '').trim() ? `只注入 #${cfg.modelLoaderNodeId}` : '跳过（有多个模型加载节点，可用 modelLoaderNodeId 指定）')
+          : `注入 ${cfg.unetName}`
+      lines.push(`模型加载节点：${list}（${how}）`)
+    } else {
+      lines.push('模型加载节点：（未找到可注入的 UNETLoader / CheckpointLoaderSimple）')
+    }
     return lines
   }
 
@@ -966,7 +991,11 @@ exports.apply = async function apply(ctx, rawConfig) {
     const cfgVal = Number(overrides.cfg) || workCfg.cfg
     const seed = Number(overrides.seed) || crypto.randomInt(1, 2 ** 32 - 1)
     const negativePrompt = joinPromptParts([overrides.negativePrompt || cfg.negativePrompt || ''])
-    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), Object.assign({}, workflowOpts(), { modelParams: overrideKeys }))
+    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), Object.assign({}, workflowOpts(), {
+      modelParams: overrideKeys,
+      overrideModel: baseCfg.workflowOverrideModel !== false,
+      modelLoaderNodeId: baseCfg.modelLoaderNodeId || '',
+    }))
 
     const clientId = crypto.randomUUID()
     const submit = await comfyPost('/prompt', { prompt: promptBody, client_id: clientId }, 20000)
