@@ -601,3 +601,12 @@ defaultWorkflowPreset: 基础文生图
 
 - 补充 02（VACE 深度控制）、05（分块放大）、10（参考图编辑）、11（换背景）、12（新场景合成）的实测结论、依赖与踩坑要点。
 - 说明 ComfyUI 自带的 `ReferenceLatent` 与 Advanced-ControlNet 的 `ACN_ReferenceControlNet` 对 Anima **均静默失效**，不要用。
+
+### 1.6.9
+
+纯文档补全，代码无改动：
+
+- 「可用性对照」表加入 11（换背景）与 12（换新场景），表头改为 12 个工作流。
+- 自定义节点包表补上 `ComfyUI-Cosmos-Reference`（10 的参考图编辑需要）。
+- 新增「各工作流的额外模型」清单：9 个模型文件的目录、大小、用途一次列全。
+- 补充两条易踩的坑：检测器类模型要放两份（Impact Pack 只读安装目录）；`DepthAnythingV2Preprocessor` 不显式指定 `ckpt_name` 会去下 1.3GB 的 Large 版。
