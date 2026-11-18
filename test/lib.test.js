@@ -787,3 +787,32 @@ test('modelParams override custom workflow values even when the global switch is
   assert.strictEqual(w3['3'].inputs.cfg, 7)
   assert.strictEqual(w3['5'].inputs.width, 512)
 })
+
+test('resolution nodes are detected across latent node variants (EmptySD3LatentImage)', () => {
+  // 用户实际导出的 anima.json 用的是 EmptySD3LatentImage + KSamplerAdvanced
+  const graph = {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: 'anima-aesthetic-v1.1.safetensors' } },
+    '28': { class_type: 'EmptySD3LatentImage', inputs: { width: 1024, height: 1536, batch_size: 1 } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: 'p', clip: ['2', 0] } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: 'n', clip: ['2', 0] } },
+    '3': { class_type: 'KSamplerAdvanced', inputs: { model: ['1', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['28', 0], noise_seed: 1, steps: 30, cfg: 4 } },
+    '9': { class_type: 'SaveImage', inputs: { images: ['8', 0] } },
+  }
+  assert.deepStrictEqual(wf.findResolutionNodeIds(graph), ['28'])
+
+  const targets = wf.resolveCustomNodeTargets(graph, {})
+  assert.deepStrictEqual(targets.errors, [])
+  assert.deepStrictEqual(targets.positive, ['6'])
+  assert.deepStrictEqual(targets.negative, ['7'])
+  assert.deepStrictEqual(targets.resolutionIds, ['28'], 'EmptySD3LatentImage 也要能识别为尺寸节点')
+  assert.deepStrictEqual(targets.stepsIds, ['3'], 'KSamplerAdvanced 也要能识别为采样节点')
+  assert.deepStrictEqual(targets.seedIds, ['3'], 'KSamplerAdvanced 用 noise_seed')
+
+  // 真的能覆盖到
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'anima-sd3.json', graph)
+  wf.clearWorkflowCache()
+  const w = wf.customWorkflow(baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file }), 'P', 'N', 832, 1216, 30, 4, 5, true)
+  assert.strictEqual(w['28'].inputs.width, 832)
+  assert.strictEqual(w['28'].inputs.height, 1216)
+})
