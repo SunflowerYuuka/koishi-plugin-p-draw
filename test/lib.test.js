@@ -565,3 +565,43 @@ test('auto detection works on a realistic Aesthetic baseline graph with a LoRA c
   assert.strictEqual(w['7'].inputs.latent_image[0], '6')
   assert.strictEqual(w['1'].class_type, 'UnetLoaderGGUF', '不要改用户工作流里的 loader')
 })
+
+test('parseStepsCfg extracts --steps / --cfg and strips them from the prompt', () => {
+  const r1 = parse.parseStepsCfg('少女站在河岸 --steps 40 --cfg 3.5')
+  assert.strictEqual(r1.steps, 40)
+  assert.strictEqual(r1.cfg, 3.5)
+  assert.strictEqual(r1.prompt, '少女站在河岸')
+
+  // 中文别名与 = : 变体
+  const r2 = parse.parseStepsCfg('1girl --步数=28 --强度:5.5')
+  assert.strictEqual(r2.steps, 28)
+  assert.strictEqual(r2.cfg, 5.5)
+  assert.strictEqual(r2.prompt, '1girl')
+
+  // 未提供时返回 null，提示词不变
+  const r3 = parse.parseStepsCfg('一个女孩，白色裙子')
+  assert.strictEqual(r3.steps, null)
+  assert.strictEqual(r3.cfg, null)
+  assert.strictEqual(r3.prompt, '一个女孩，白色裙子')
+
+  // 只给其中一个
+  const r4 = parse.parseStepsCfg('少女 --cfg 2')
+  assert.strictEqual(r4.steps, null)
+  assert.strictEqual(r4.cfg, 2)
+  assert.strictEqual(r4.prompt, '少女')
+
+  // 越界值截断，非法值忽略
+  assert.strictEqual(parse.parseStepsCfg('a --steps 400').steps, parse.STEPS_LIMIT.max)
+  assert.strictEqual(parse.parseStepsCfg('a --cfg 99').cfg, parse.CFG_LIMIT.max)
+  assert.strictEqual(parse.parseStepsCfg('a --steps 0').steps, null)
+})
+
+test('parseStepsCfg does not eat ordinary prompt text', () => {
+  // 没有 -- 前缀的普通词不应被当成参数
+  const r = parse.parseStepsCfg('1girl, steps on stairs, cfg 7')
+  assert.strictEqual(r.steps, null)
+  assert.strictEqual(r.cfg, null)
+  assert.strictEqual(r.prompt, '1girl, steps on stairs, cfg 7')
+  // --seed 不能被误判成 --steps
+  assert.strictEqual(parse.parseStepsCfg('a --seed 42').steps, null)
+})

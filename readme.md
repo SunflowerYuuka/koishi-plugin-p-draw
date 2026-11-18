@@ -11,6 +11,7 @@ p点-绘图插件，连接本地 ComfyUI 生图，参考 AstrBot 的 [anima 绘�
 - 联网搜索：描述中带 `联网`/`搜索`/`查一下` 等词时自动补充角色设定（需 Tavily Key）。
 - 原样 tags 模式（`无优化` 前缀）。
 - 尺寸选择：`竖图` `横图` `方图` `长竖图` `宽屏`，或 `1024x1536：描述` / `--尺寸 1216x832`。
+- 采样参数临时覆盖（可选）：`画图 少女 --cfg 3.5 --steps 40`（也可写 `--强度 3.5` / `--步数 40`）。优先级：命令级 > `modelParams` > 全局配置；参数会从提示词里剥离，不会混进 tags。
 - 画师组管理（创建 / 追加 / 切换 / 查看 / 删除）。
 - 固定角色（`添加角色 名称=tags`，可用 `查看角色` / `删除角色 名称` 管理）。
 - **用户自选模型**：`p-draw 模型` 查看当前与可用模型（自动读取 ComfyUI 的 UNET 和 Animagine checkpoint），`p-draw 模型 <名称>` 切换（支持模糊匹配，如 `anima-aesthetic`），`p-draw 模型 默认` 恢复默认。偏好按用户保存（`p_draw_config.user_models`），单人和多人生成都会生效；未自选时用 `unetName` 默认模型。自定义工作流（`customWorkflowEnabled`）不参与模型切换。
@@ -48,6 +49,7 @@ plugins:
 画图 无优化 masterpiece, best quality, 1girl, solo, white dress, simple background
 画图 竖图：狐莉站在梨花树下
 画图 1024x1536：少女站在河岸
+画图 少女站在河岸 --cfg 3.5 --steps 40
 画图 创建画师组 千代风格=@artist_a, @artist_b,
 画图 切换画师组 千代风格
 画图 添加角色 狐莉=1girl, solo, fox girl
@@ -67,7 +69,7 @@ plugins:
 | `comfyuiBaseUrl` | ComfyUI API 地址（默认 `http://127.0.0.1:8188`） |
 | `unetName` / `clipName` / `vaeName` | 模型文件名，需与 ComfyUI 下拉框中的文件名一致 |
 | `useGgufUnet` | 主模型加载方式：`auto`（按文件名后缀判断，默认）/ `true`（强制 `UnetLoaderGGUF`，需装 ComfyUI-GGUF）/ `false`（强制 `UNETLoader`） |
-| `modelParams` | 每个模型独立参数覆盖（字典）：`key`=模型文件名，`value`=要覆盖的 `samplerName` / `scheduler` / `steps` / `cfg` / `width` / `height`。让不同模型用各自最佳采样参数，只填需要覆盖的字段，命令级 `--steps`/`--cfg` 仍优先 |
+| `modelParams` | 每个模型独立参数覆盖（字典）：`key`=模型文件名，`value`=要覆盖的 `samplerName` / `scheduler` / `steps` / `cfg` / `width` / `height`。让不同模型用各自最佳采样参数，只填需要覆盖的字段，不填的用全局默认。匹配不区分大小写与 -/_。优先级：命令级 `--steps`/`--cfg` > 模型级 `modelParams` > 全局配置 |
 | `customWorkflowEnabled` / `customWorkflowPath` | 使用自定义工作流 JSON；路径相对 Koishi 运行目录解析（插件目录作为回退） |
 | `customWorkflowReloadOnChange` | 工作流 JSON 变化时自动重载，无需重启插件（默认 `true`） |
 | `positivePromptNodeId` / `negativePromptNodeId` | 自定义工作流中正/负面提示词节点 ID；留空自动识别 |
@@ -186,6 +188,7 @@ p-draw:
 - 批量张数按「张数 × 单价」**一次性扣足总价**，余额不足则整单不生成；单张失败只退该张。
 - 生成失败会自动退回 P 点。
 - 固定种子 `--seed 数字`（支持 `--seed:` `--seed=` `--seed＝` 形式）在单张和批量生成中都可用，且会从提示词中自动剥离，不会混进 tags。
+- 采样参数 `--steps 40` / `--cfg 3.5`（兼容 `--步数` / `--强度`，支持 `=` `:` 形式）同样会从提示词中剥离，只覆盖当次生成，不改配置。取值范围：步数 1–150，CFG 0–30，超出会被截断。
 - 多人指令的视觉校验需要单独配置视觉模型（`verifyLlm*`），未配置时会跳过校验直接发送。
 - **提示词优化券**：当全局 `promptOptimizeEnabled` 关闭时，普通用户生图会**交互式询问**是否使用券（记录在 `p_system.llmToken`）：
   - 有券 → 询问是否使用；确认后消耗券并 LLM 优化，**拒绝则取消本次生图**（不扣 P）；

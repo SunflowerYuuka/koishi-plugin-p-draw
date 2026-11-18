@@ -25,6 +25,7 @@ exports.usage = `
     别名：部署诊断
     输出更详细的配置与连通性诊断。
 - **尺寸：** 支持 \`竖图\` \`横图\` \`方图\` \`长竖图\` \`宽屏\` 或在描述中写 \`1024x1536：描述\` / \`--尺寸 1216x832\`。
+- **采样参数：** 描述里可写 \`--steps 40\` / \`--cfg 3.5\`（也可写 \`--步数\` / \`--强度\`）临时覆盖步数与 CFG，优先于 \`modelParams\` 与全局配置。
 - **原样模式：** 描述前加 \`无优化\` 直接提交写好的 tags。
 - **联网搜索：** 描述中带 \`联网\` / \`搜索\` / \`查一下\` 等词时，会先联网搜索补充角色设定（需配置 Tavily Key）。
 - **画师组：** \`创建画师组 名称=tags\` \`切换画师组 名称\` \`查看画师组\` \`删除画师组 名称\`
@@ -132,7 +133,7 @@ exports.Config = Schema.object({
 // 纯函数库已拆分到 lib/（解析 / tag 清洗 / 工作流 / Comfy 等待 / 多人规划 / HTTP 客户端）
 // ------------------------------------------------------------------
 const {
-  normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed,
+  normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed, parseStepsCfg,
   stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
 } = require('./lib/parse')
 const {
@@ -1486,9 +1487,16 @@ exports.apply = async function apply(ctx, cfg) {
 
     // 批量张数解析（x3 / 3张 / --数量 3 等）
     const parsedBatch = parseBatchCount(parsedSize.prompt, cfg.batchMax)
-    const text = parsedBatch.prompt
+    // 采样参数覆盖（--steps 40 / --cfg 3.5），并从描述中剥离，避免进入 LLM 规划
+    const parsedTuning = parseStepsCfg(parsedBatch.prompt)
+    const text = parsedTuning.prompt
     if (!text) return session.text('.multi-usage')
     const count = parsedBatch.count
+    const tuningOverrides = Object.assign(
+      {},
+      parsedTuning.steps != null ? { steps: parsedTuning.steps } : {},
+      parsedTuning.cfg != null ? { cfg: parsedTuning.cfg } : {},
+    )
 
     // P 点校验（按总价 = 张数 × 单价）
     const pcheck = await precheckPoints(session, USERID, isAdmin, count * price)
@@ -1533,7 +1541,7 @@ exports.apply = async function apply(ctx, cfg) {
     }
 
     // 队列：预排队全部任务（先查容量再入队，占满整体退回总价）
-    const queued = await enqueueBatch(count, (i) => runComfyGenerate(finalPrompt, size, { negativePrompt: multiNegative, unet }), { USERID, isAdmin, totalPrice: count * price })
+    const queued = await enqueueBatch(count, (i) => runComfyGenerate(finalPrompt, size, Object.assign({ negativePrompt: multiNegative, unet }, tuningOverrides)), { USERID, isAdmin, totalPrice: count * price })
     if (!queued.ok) return queued.message
     const queuedTasks = queued.tasks
     const firstPosition = queued.firstPosition
@@ -1551,7 +1559,7 @@ exports.apply = async function apply(ctx, cfg) {
       if (cfg.queueEnabled) {
         try { result = await queuedTasks[i] } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       } else {
-        try { result = await runComfyGenerate(finalPrompt, size, { negativePrompt: multiNegative, unet }) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
+        try { result = await runComfyGenerate(finalPrompt, size, Object.assign({ negativePrompt: multiNegative, unet }, tuningOverrides)) } catch (e) { result = { ok: false, message: `生成失败：${e.message}` } }
       }
       if (!result.ok || !result.outputs || !result.outputs.length) return result
       if (!cfg.multiVerifyEnabled) {
@@ -1939,9 +1947,20 @@ exports.apply = async function apply(ctx, cfg) {
     const parsedBatch = parseBatchCount(parsedSize.prompt, cfg.batchMax)
     // 固定种子解析（--seed:xxx / --seed xxx / --seed=xxx），并从提示词中剥离
     const parsedSeed = parseSeed(parsedBatch.prompt)
-    const text = parsedSeed.prompt
+    // 采样参数覆盖（--steps 40 / --cfg 3.5），并从提示词中剥离
+    const parsedTuning = parseStepsCfg(parsedSeed.prompt)
+    const text = parsedTuning.prompt
     const seed = parsedSeed.seed
     const count = parsedBatch.count
+    // 命令级参数优先于 modelParams 与全局配置（见 runComfyGenerate）
+    const tuningOverrides = Object.assign(
+      {},
+      parsedTuning.steps != null ? { steps: parsedTuning.steps } : {},
+      parsedTuning.cfg != null ? { cfg: parsedTuning.cfg } : {},
+    )
+    if (cfg.outputLogs && (parsedTuning.steps != null || parsedTuning.cfg != null)) {
+      logger.info(`[p-draw] 命令级参数覆盖：steps=${parsedTuning.steps ?? '-'} cfg=${parsedTuning.cfg ?? '-'}`)
+    }
 
     // P 点校验（按总价 = 张数 × 单价）
     // P 点校验（按总价 = 张数 × 单价）
@@ -2042,6 +2061,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 用户手写了 negative: 区块时，默认负面词仍保留；用户 tag 只补充未出现的部分。
     const generationOverrides = Object.assign(
       { unet, seed },
+      tuningOverrides,
       userNegativePrompt ? { negativePrompt: mergeNegativePrompts(cfg.negativePrompt, userNegativePrompt) } : {},
     )
 

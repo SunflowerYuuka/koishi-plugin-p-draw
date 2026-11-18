@@ -222,3 +222,47 @@ test('end-to-end: prompt lands in configured nodes, quality prefix skipped, imag
     if (savedWebSocket) globalThis.WebSocket = savedWebSocket
   }
 })
+
+test('end-to-end: --steps / --cfg override the workflow and never leak into the prompt', async () => {
+  const savedWebSocket = globalThis.WebSocket
+  delete globalThis.WebSocket
+
+  const { state, server } = startStubComfy()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+
+  try {
+    const baseDir = tmpDir('pdrawtest-e2e-')
+    const wfDir = path.join(baseDir, 'data', 'p-draw', 'workflows')
+    fs.mkdirSync(wfDir, { recursive: true })
+    fs.writeFileSync(path.join(wfDir, 'anima-aesthetic-v1.1.json'), JSON.stringify(aestheticGraph()))
+
+    const { ctx, actions } = makeCtx(baseDir)
+    const plugin = require('../index.js')
+    await plugin.apply(ctx, makeCfg(port))
+
+    const sent = []
+    const session = {
+      userId: '10001',
+      platform: 'onebot',
+      messageId: 'm2',
+      event: { message: { id: 'm2' } },
+      text: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''),
+      send: async (content) => { sent.push(content) },
+    }
+
+    // 配置文件里是 steps=30 / cfg=4，命令级参数应覆盖它们
+    await actions[0]({ session }, '1girl, solo --steps 45 --cfg 2.5')
+
+    const posted = state.captured && state.captured.prompt
+    assert.ok(posted, '应向 ComfyUI POST /prompt')
+    assert.strictEqual(posted['7'].inputs.steps, 45, '命令行 --steps 应覆盖配置文件')
+    assert.strictEqual(posted['7'].inputs.cfg, 2.5, '命令行 --cfg 应覆盖配置文件')
+    // 参数必须从提示词里剥离，不能变成 tag
+    assert.strictEqual(posted['4'].inputs.text, '1girl, solo')
+    assert.ok(!posted['4'].inputs.text.includes('--'))
+  } finally {
+    server.close()
+    if (savedWebSocket) globalThis.WebSocket = savedWebSocket
+  }
+})
