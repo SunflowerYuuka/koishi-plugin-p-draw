@@ -11,6 +11,19 @@ const wf = require('../lib/workflows')
 const comfy = require('../lib/comfy')
 const multi = require('../lib/multi')
 
+// 统一的测试临时目录：进程退出时自动清理，避免在系统临时目录留下垃圾
+const tempDirs = []
+function tmpDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  tempDirs.push(dir)
+  return dir
+}
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch (e) { /* ignore */ }
+  }
+})
+
 // ---------------- parse.js ----------------
 
 test('normalizeBaseUrl', () => {
@@ -219,7 +232,7 @@ test('buildWorkflow routes normalized Animagine names while retaining Anima rout
 })
 
 test('buildWorkflow keeps custom workflow precedence over Animagine routing', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-wf-'))
+  const dir = tmpDir('pdrawtest-wf-')
   const file = path.join(dir, 'wf.json')
   fs.writeFileSync(file, JSON.stringify({
     '1': { class_type: 'KSampler', inputs: { positive: ['10', 0], negative: ['11', 0], seed: 0 } },
@@ -238,7 +251,7 @@ test('buildWorkflow keeps custom workflow precedence over Animagine routing', ()
 })
 
 test('customWorkflow injects text and throws on missing nodes', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-wf-'))
+  const dir = tmpDir('pdrawtest-wf-')
   const json = {
     '1': { class_type: 'KSampler', inputs: { model: ['2', 0], positive: ['10', 0], negative: ['11', 0], seed: 0 } },
     '10': { class_type: 'CLIPTextEncode', inputs: { text: 'OLD', clip: ['45', 0] } },
@@ -257,6 +270,173 @@ test('customWorkflow injects text and throws on missing nodes', () => {
   const badFile = path.join(dir, 'bad.json')
   fs.writeFileSync(badFile, JSON.stringify({ '1': { class_type: 'KSampler', inputs: { positive: ['10', 0] } } }))
   assert.throws(() => wf.customWorkflow(baseCfg({ customWorkflowEnabled: true, customWorkflowPath: badFile }), 'p', 'n', 1, 1, 1, 1, 1, false), /找不到正面提示词节点/)
+})
+
+// ---------------- workflows.js：自定义工作流（Design.md A1/A2/A3/A5/A6/A7） ----------------
+
+// 贴近 Aesthetic 1.1 Text-to-Image Baseline 的最小节点表（节点 ID 仅测试用，不代表真实导出）
+function baselineGraph() {
+  return {
+    '44': { class_type: 'UNETLoader', inputs: { unet_name: 'anima-aesthetic-v1.1.safetensors', weight_dtype: 'default' } },
+    '45': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_3_06b_base.safetensors', type: 'stable_diffusion' } },
+    '15': { class_type: 'VAELoader', inputs: { vae_name: 'qwen_image_vae.safetensors' } },
+    '5': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: 'old positive', clip: ['45', 0] }, _meta: { title: 'CLIP Text Encode (Positive Prompt)' } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: 'old negative', clip: ['45', 0] }, _meta: { title: 'CLIP Text Encode (Negative Prompt)' } },
+    '3': { class_type: 'KSampler', inputs: { model: ['44', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0], seed: 1, steps: 20, cfg: 7, sampler_name: 'euler', scheduler: 'normal', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['15', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'ComfyUI' } },
+  }
+}
+
+function writeWorkflowFile(dir, name, json) {
+  const file = path.join(dir, name)
+  fs.writeFileSync(file, JSON.stringify(json))
+  return file
+}
+
+test('isGgufUnet resolves auto / true / false', () => {
+  assert.strictEqual(wf.isGgufUnet({ unetName: 'anima-aesthetic-v1.1-Q8_0.gguf' }), true)
+  assert.strictEqual(wf.isGgufUnet({ unetName: 'X.GGUF' }), true)
+  assert.strictEqual(wf.isGgufUnet({ unetName: 'anima-aesthetic-v1.1.safetensors' }), false)
+  assert.strictEqual(wf.isGgufUnet({ unetName: 'x.safetensors', useGgufUnet: 'true' }), true)
+  assert.strictEqual(wf.isGgufUnet({ unetName: 'x.gguf', useGgufUnet: 'false' }), false)
+})
+
+test('animaT2IWorkflow switches loader to UnetLoaderGGUF for .gguf models (A2)', () => {
+  const gguf = wf.animaT2IWorkflow(baseCfg({ unetName: 'anima-aesthetic-v1.1-Q8_0.gguf' }), 'p', 'n', 1024, 1024, 30, 4, 7)
+  assert.strictEqual(gguf['44'].class_type, 'UnetLoaderGGUF')
+  assert.strictEqual(gguf['44'].inputs.unet_name, 'anima-aesthetic-v1.1-Q8_0.gguf')
+  // GGUF loader 不接受 weight_dtype
+  assert.strictEqual('weight_dtype' in gguf['44'].inputs, false)
+  // KSampler 链路不变
+  assert.strictEqual(gguf['19'].inputs.model[0], '44')
+
+  const sft = wf.animaT2IWorkflow(baseCfg(), 'p', 'n', 1024, 1024, 30, 4, 7)
+  assert.strictEqual(sft['44'].class_type, 'UNETLoader')
+})
+
+test('resolveCustomWorkflowPath prefers Koishi baseDir, then plugin dir', () => {
+  const baseDir = tmpDir('pdrawtest-base-')
+  const nested = path.join(baseDir, 'data', 'p-draw', 'workflows')
+  fs.mkdirSync(nested, { recursive: true })
+  const target = path.join(nested, 'anima-aesthetic-v1.1.json')
+  fs.writeFileSync(target, JSON.stringify(baselineGraph()))
+
+  // A5 的相对路径按运行目录解析
+  assert.strictEqual(
+    wf.resolveCustomWorkflowPath({ customWorkflowPath: 'data/p-draw/workflows/anima-aesthetic-v1.1.json' }, { baseDir }),
+    target,
+  )
+  // 绝对路径直接使用
+  assert.strictEqual(wf.resolveCustomWorkflowPath({ customWorkflowPath: target }, {}), target)
+  // 空路径 / 缺失文件都要明确报错
+  assert.throws(() => wf.resolveCustomWorkflowPath({ customWorkflowPath: '' }, {}), /为空/)
+  assert.throws(() => wf.resolveCustomWorkflowPath({ customWorkflowPath: 'nope.json' }, { baseDir }), /不存在/)
+})
+
+test('auto detection resolves positive/negative text nodes without configured IDs', () => {
+  const targets = wf.resolveCustomNodeTargets(baselineGraph(), {})
+  assert.deepStrictEqual(targets.errors, [])
+  assert.deepStrictEqual(targets.positive, ['6'])
+  assert.deepStrictEqual(targets.negative, ['7'])
+  assert.deepStrictEqual(targets.resolutionIds, ['5'])
+  assert.deepStrictEqual(targets.stepsIds, ['3'])
+  assert.deepStrictEqual(targets.seedIds, ['3'])
+})
+
+test('explicit node IDs take priority over structure detection (A3)', () => {
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'wf.json', baselineGraph())
+  wf.clearWorkflowCache()
+  const w = wf.customWorkflow(baseCfg({
+    customWorkflowEnabled: true,
+    customWorkflowPath: file,
+    positivePromptNodeId: '6',
+    negativePromptNodeId: '7',
+  }), 'POS', 'NEG', 832, 1216, 30, 4.5, 99, false)
+  assert.strictEqual(w['6'].inputs.text, 'POS')
+  assert.strictEqual(w['7'].inputs.text, 'NEG')
+})
+
+test('invalid configured node ID reports the available text nodes', () => {
+  const missing = wf.resolveCustomNodeTargets(baselineGraph(), { positivePromptNodeId: '999' })
+  assert.ok(missing.errors.some(e => e.includes('999')))
+  assert.ok(missing.errors.some(e => e.includes('#6')))
+
+  // 存在但不是文本编码节点
+  const notText = wf.resolveCustomNodeTargets(baselineGraph(), { positivePromptNodeId: '3' })
+  assert.ok(notText.errors.some(e => e.includes('不是文本编码节点')))
+})
+
+test('resolutionNodeId / stepsNodeId / seedNodeId narrow the override targets', () => {
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'wf.json', baselineGraph())
+  wf.clearWorkflowCache()
+  const w = wf.customWorkflow(baseCfg({
+    customWorkflowEnabled: true,
+    customWorkflowPath: file,
+    positivePromptNodeId: '6',
+    negativePromptNodeId: '7',
+    resolutionNodeId: '5',
+    stepsNodeId: '3',
+    seedNodeId: '3',
+    customWorkflowOverrideParameters: true,
+  }), 'P', 'N', 768, 1344, 12, 3.5, 555, true)
+  assert.strictEqual(w['5'].inputs.width, 768)
+  assert.strictEqual(w['5'].inputs.height, 1344)
+  assert.strictEqual(w['3'].inputs.steps, 12)
+  assert.strictEqual(w['3'].inputs.cfg, 3.5)
+  assert.strictEqual(w['3'].inputs.seed, 555)
+  // 采样器/调度器一并覆盖
+  assert.strictEqual(w['3'].inputs.sampler_name, 'er_sde')
+  assert.strictEqual(w['3'].inputs.scheduler, 'simple')
+})
+
+test('customWorkflowReloadOnChange reloads on mtime change, and keeps cache when disabled (A6)', () => {
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = path.join(dir, 'wf.json')
+  const withMarker = baselineGraph()
+  withMarker['77'] = { class_type: 'Note', inputs: { text: 'marker' } }
+  fs.writeFileSync(file, JSON.stringify(withMarker))
+  wf.clearWorkflowCache()
+
+  // 首次读取建立缓存
+  const first = wf.customWorkflow(baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file }), 'P', 'N', 832, 1216, 30, 4.5, 1, false)
+  assert.ok(first['77'])
+
+  // 换掉文件内容并推进 mtime
+  const withoutMarker = baselineGraph()
+  fs.writeFileSync(file, JSON.stringify(withoutMarker))
+  const later = new Date(Date.now() + 5000)
+  fs.utimesSync(file, later, later)
+
+  // reloadOnChange=false：仍用缓存（旧内容）
+  const stale = wf.customWorkflow(baseCfg({
+    customWorkflowEnabled: true, customWorkflowPath: file, customWorkflowReloadOnChange: false,
+  }), 'P', 'N', 832, 1216, 30, 4.5, 1, false)
+  assert.ok(stale['77'], '关闭重载时应继续使用缓存')
+
+  // reloadOnChange=true（默认）：读到新内容
+  const reloaded = wf.customWorkflow(baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file }), 'P', 'N', 832, 1216, 30, 4.5, 1, false)
+  assert.strictEqual(reloaded['77'], undefined, '开启重载时应读到新的工作流文件')
+})
+
+test('inspectCustomWorkflow reports resolved node IDs and configuration errors', () => {
+  const dir = tmpDir('pdrawtest-wf-')
+  const file = writeWorkflowFile(dir, 'wf.json', baselineGraph())
+  wf.clearWorkflowCache()
+
+  const ok = wf.inspectCustomWorkflow(baseCfg({ customWorkflowEnabled: true, customWorkflowPath: file }), {})
+  assert.strictEqual(ok.ok, true)
+  assert.deepStrictEqual(ok.targets.positive, ['6'])
+  assert.ok(ok.path.endsWith('wf.json'))
+
+  const bad = wf.inspectCustomWorkflow(baseCfg({
+    customWorkflowEnabled: true, customWorkflowPath: file, positivePromptNodeId: '999',
+  }), {})
+  assert.strictEqual(bad.ok, false)
+  assert.ok(bad.error.includes('999'))
 })
 
 // ---------------- comfy.js ----------------
@@ -340,4 +520,48 @@ test('multiPersonAutoSize', () => {
   assert.deepStrictEqual(multi.multiPersonAutoSize('两个女孩', allowed), [1152, 896])
   assert.deepStrictEqual(multi.multiPersonAutoSize('34人', allowed), [1152, 896])
   assert.strictEqual(multi.multiPersonAutoSize('x', []), null)
+})
+
+test('auto detection works on a realistic Aesthetic baseline graph with a LoRA chain', () => {
+  // 贴近 text2image anima-aesthetic-v1.1.json 的结构：GGUF loader -> LoraLoader -> KSampler
+  const graph = {
+    '1': { class_type: 'UnetLoaderGGUF', inputs: { unet_name: 'anima-aesthetic-v1.1-Q8_0.gguf' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen_3_06b_base.safetensors', type: 'stable_diffusion' } },
+    '3': { class_type: 'LoraLoader', inputs: { lora_name: 'style.safetensors', strength_model: 1, strength_clip: 1, model: ['1', 0], clip: ['2', 0] } },
+    '4': { class_type: 'CLIPTextEncode', inputs: { text: 'pos', clip: ['3', 1] }, _meta: { title: 'CLIP Text Encode (Positive Prompt)' } },
+    '5': { class_type: 'CLIPTextEncode', inputs: { text: 'neg', clip: ['3', 1] }, _meta: { title: 'CLIP Text Encode (Negative Prompt)' } },
+    '6': { class_type: 'EmptyLatentImage', inputs: { width: 1024, height: 1024, batch_size: 1 } },
+    '7': { class_type: 'KSampler', inputs: { model: ['3', 0], positive: ['4', 0], negative: ['5', 0], latent_image: ['6', 0], seed: 0, steps: 30, cfg: 4, sampler_name: 'er_sde', scheduler: 'simple', denoise: 1 } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['9', 0] } },
+    '9': { class_type: 'VAELoader', inputs: { vae_name: 'qwen_image_vae.safetensors' } },
+    '10': { class_type: 'SaveImage', inputs: { images: ['8', 0], filename_prefix: 'ComfyUI' } },
+  }
+
+  const targets = wf.resolveCustomNodeTargets(graph, {})
+  assert.deepStrictEqual(targets.errors, [])
+  assert.deepStrictEqual(targets.positive, ['4'])
+  assert.deepStrictEqual(targets.negative, ['5'])
+  // 只认 EmptyLatentImage 作为尺寸节点，不会误伤其它节点
+  assert.deepStrictEqual(targets.resolutionIds, ['6'])
+  assert.deepStrictEqual(targets.stepsIds, ['7'])
+
+  // 走一遍完整注入，确认提示词、尺寸、seed 都落在正确的节点上
+  const dir = tmpDir('pdrawtest-real-')
+  const file = writeWorkflowFile(dir, 'aesthetic.json', graph)
+  wf.clearWorkflowCache()
+  const w = wf.customWorkflow(baseCfg({
+    customWorkflowEnabled: true,
+    customWorkflowPath: file,
+    customWorkflowOverrideParameters: true,
+  }), '1girl, solo, white dress', 'worst quality', 1024, 1536, 30, 4, 20241118, true)
+
+  assert.strictEqual(w['4'].inputs.text, '1girl, solo, white dress')
+  assert.strictEqual(w['5'].inputs.text, 'worst quality')
+  assert.strictEqual(w['6'].inputs.width, 1024)
+  assert.strictEqual(w['6'].inputs.height, 1536)
+  assert.strictEqual(w['7'].inputs.seed, 20241118)
+  // 节点 ID 与连线必须原样保留，不能被改写
+  assert.strictEqual(w['7'].inputs.model[0], '3')
+  assert.strictEqual(w['7'].inputs.latent_image[0], '6')
+  assert.strictEqual(w['1'].class_type, 'UnetLoaderGGUF', '不要改用户工作流里的 loader')
 })

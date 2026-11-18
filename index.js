@@ -37,13 +37,24 @@ exports.Config = Schema.object({
   comfyuiBaseUrl: Schema.string().default('http://127.0.0.1:8188').description('ComfyUI 地址'),
   workflow: Schema.string().default('anima_t2i').description('工作流类型（内置 anima_t2i）'),
   customWorkflowEnabled: Schema.boolean().default(false).description('使用自定义 ComfyUI 工作流 JSON'),
-  customWorkflowPath: Schema.string().default('').description('自定义工作流 JSON 路径（相对插件目录）'),
+  customWorkflowPath: Schema.string().default('').description('自定义工作流 JSON 路径（相对 Koishi 运行目录，例如 data/p-draw/workflows/anima-aesthetic-v1.1.json；插件目录作为回退）'),
   customWorkflowOverrideParameters: Schema.boolean().default(false).description('用插件参数覆盖自定义工作流参数'),
+  customWorkflowReloadOnChange: Schema.boolean().default(true).description('工作流 JSON 变化时自动重载（无需重启插件）'),
+  positivePromptNodeId: Schema.string().default('').description('自定义工作流中正面提示词节点 ID（留空自动识别；示例 6，以实际 JSON 为准）'),
+  negativePromptNodeId: Schema.string().default('').description('自定义工作流中负面提示词节点 ID（留空自动识别；示例 7，以实际 JSON 为准）'),
+  resolutionNodeId: Schema.string().default('').description('自定义工作流中尺寸节点 ID（EmptyLatentImage，可留空；示例 5）'),
+  seedNodeId: Schema.string().default('').description('自定义工作流中种子节点 ID（KSampler，可留空；示例 3）'),
+  stepsNodeId: Schema.string().default('').description('自定义工作流中步数节点 ID（KSampler，可留空；示例 3）'),
   timeout: Schema.number().default(300).description('单次生成超时（秒）'),
   pollInterval: Schema.number().default(2).description('生成状态查询间隔（秒）'),
 
   // 模型文件
-  unetName: Schema.string().default('anima-base-v1.0.safetensors').description('主模型文件名（需与 ComfyUI models/diffusion_models 下的文件名完全一致，含连字符；默认 anima-base-v1.0.safetensors）'),
+  unetName: Schema.string().default('anima-aesthetic-v1.1.safetensors').description('主模型文件名（需与 ComfyUI models/diffusion_models 下的文件名完全一致，含连字符）。8G 显存推荐改为 GGUF Q8_0 版（如 anima-aesthetic-v1.1-Q8_0.gguf），插件会自动改用 UnetLoaderGGUF 加载'),
+  useGgufUnet: Schema.union([
+    Schema.const('auto').description('按模型文件名自动判断（.gguf 用 UnetLoaderGGUF）'),
+    Schema.const('true').description('强制使用 UnetLoaderGGUF（需安装 ComfyUI-GGUF）'),
+    Schema.const('false').description('强制使用原生 UNETLoader'),
+  ]).default('auto').description('主模型加载方式（auto / true / false）'),
   modelParams: Schema.dict(Schema.object({
     samplerName: Schema.string().description('采样器（如 er_sde / res_2s / dpmpp_2m）'),
     scheduler: Schema.string().description('调度器（如 simple / beta57 / normal）'),
@@ -60,13 +71,14 @@ exports.Config = Schema.object({
   height: Schema.number().default(1216).description('默认高度'),
   allowedSizes: Schema.array(Schema.string()).default(['832x1216', '896x1152', '1024x1024', '1152x896', '1216x832', '768x1344', '1344x768', '1024x1536']).description('可用尺寸列表（宽x高）'),
   steps: Schema.number().default(30).description('采样步数'),
-  cfg: Schema.number().default(4.5).description('CFG 强度'),
+  cfg: Schema.number().default(4.0).description('CFG 强度（Aesthetic 1.1 推荐 4，用 3 也常能出更好效果）'),
   samplerName: Schema.string().default('er_sde').description('采样器'),
   scheduler: Schema.string().default('simple').description('调度器'),
 
-  // 提示词
-  qualityPrefix: Schema.string().default('masterpiece, best quality, score_7, safe,').description('质量词前缀'),
-  negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name').description('负面提示词'),
+  // 提示词（默认值按 Design.md A4：Aesthetic 1.1 训练时已剥离质量标签，不需要质量前缀）
+  qualityPrefix: Schema.string().default('').description('质量词前缀（使用 Aesthetic 1.1 时建议留空；Base 模型可填 masterpiece, best quality, score_7）'),
+  skipQualityPrefixForCustomWorkflow: Schema.boolean().default(true).description('启用自定义工作流时自动跳过质量前缀注入（Aesthetic 模型不需要质量标签）'),
+  negativePrompt: Schema.string().default('worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts').description('负面提示词（Aesthetic 1.1 推荐值）'),
   promptOptimizeEnabled: Schema.boolean().default(false).description('启用自然语言优化（需要配置下方 LLM 接口）'),
   llmBaseUrl: Schema.string().default('').description('LLM 接口地址（OpenAI 兼容，例如 https://api.deepseek.com/v1）'),
   llmApiKey: Schema.string().role('secret').default('').description('LLM API Key'),
@@ -128,7 +140,7 @@ const {
   NO_ARTIST_RE, NO_STYLE_RE,
 } = require('./lib/tags')
 const {
-  buildWorkflow,
+  buildWorkflow, inspectCustomWorkflow, isGgufUnet,
 } = require('./lib/workflows')
 const { outputImages, waitComfyResult } = require('./lib/comfy')
 const { materializeImageSource } = require('./lib/media')
@@ -174,19 +186,59 @@ exports.apply = async function apply(ctx, cfg) {
   // 用户自选模型偏好（userid -> unet 文件名），持久化在 p_draw_config.user_models
   if (!cfg.userModels || typeof cfg.userModels !== 'object') cfg.userModels = {}
 
-  // 启动时清理上次运行遗留的临时目录（先清理，再创建本次目录）
-  try {
-    const leftovers = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('pdraw-'))
-    for (const name of leftovers) {
-      const dir = path.join(os.tmpdir(), name)
-      try {
-        for (const file of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, file))
-        fs.rmdirSync(dir)
-      } catch (e) { /* ignore */ }
-    }
-  } catch (e) { /* ignore */ }
+  // 启动时清理上次运行遗留的临时目录（先清理，再创建本次目录）。
+  // 目录名带 PID：只清理「进程已退出」的目录，避免并行实例把自己的活跃临时目录删掉
+  // （旧版无 PID 后缀的 pdraw-* 视为历史遗留，直接清理）。
+  function cleanupStaleTempDirs() {
+    try {
+      for (const name of fs.readdirSync(os.tmpdir())) {
+        if (!name.startsWith('pdraw-')) continue
+        const owned = name.match(/^pdraw-(\d+)-/)
+        if (owned) {
+          const pid = parseInt(owned[1], 10)
+          if (pid === process.pid) continue
+          try {
+            process.kill(pid, 0)
+            continue // 进程仍存活，跳过
+          } catch (e) { /* 进程已退出，可清理 */ }
+        }
+        const dir = path.join(os.tmpdir(), name)
+        try {
+          for (const file of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, file))
+          fs.rmdirSync(dir)
+        } catch (e) { /* ignore */ }
+      }
+    } catch (e) { /* ignore */ }
+  }
 
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-'))
+  cleanupStaleTempDirs()
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pdraw-${process.pid}-`))
+
+  // 自定义工作流目录（Design.md A7：工作流文件由用户从 ComfyUI 导出后放入 data/p-draw/workflows/）
+  const workflowDir = path.join(ctx.baseDir || process.cwd(), 'data', 'p-draw', 'workflows')
+  try {
+    fs.mkdirSync(workflowDir, { recursive: true })
+  } catch (e) {
+    logger.warn(`创建自定义工作流目录失败（${workflowDir}）：${e.message}`)
+  }
+
+  // 自定义工作流路径一律相对 Koishi 运行目录解析（见 lib/workflows.js）
+  const workflowOpts = () => ({ baseDir: ctx.baseDir || process.cwd() })
+
+  // A4：自定义工作流（Aesthetic 1.1）默认跳过质量前缀注入
+  function shouldSkipQualityPrefix() {
+    return Boolean(cfg.customWorkflowEnabled && cfg.skipQualityPrefixForCustomWorkflow)
+  }
+
+  // A7：自定义工作流启用且质量前缀非空时，提示用户质量标签可能不适用于 Aesthetic 模型
+  function qualityPrefixWarning() {
+    if (!cfg.customWorkflowEnabled) return ''
+    if (!String(cfg.qualityPrefix || '').trim()) return ''
+    return shouldSkipQualityPrefix()
+      ? '检测到自定义工作流已启用，已自动跳过质量前缀注入；qualityPrefix 对 Aesthetic 模型不生效，建议手动置空。'
+      : '检测到自定义工作流已启用，qualityPrefix 可能不适用于 Aesthetic 模型，建议手动置空（或开启 skipQualityPrefixForCustomWorkflow）。'
+  }
 
   const baseUrl = () => normalizeBaseUrl(cfg.comfyuiBaseUrl)
 
@@ -259,14 +311,21 @@ exports.apply = async function apply(ctx, cfg) {
     payload.vram_total_mb = Math.round((device.vram_total || 0) / 1024 / 1024)
     payload.vram_free_mb = Math.round((device.vram_free || 0) / 1024 / 1024)
     if (objectInfo) {
-      const unetList = availableModels(objectInfo, 'UNETLoader', 'unet_name')
+      // 主模型列表按实际使用的 loader 读取：GGUF 走 UnetLoaderGGUF，其余走 UNETLoader
+      const gguf = isGgufUnet(cfg)
+      const unetNode = gguf ? 'UnetLoaderGGUF' : 'UNETLoader'
+      const unetList = availableModels(objectInfo, unetNode, 'unet_name')
       const clipList = availableModels(objectInfo, 'CLIPLoader', 'clip_name')
       const vaeList = availableModels(objectInfo, 'VAELoader', 'vae_name')
+      payload.unet_loader = unetNode
+      payload.unet_loader_available = Boolean(objectInfo[unetNode])
       payload.unet_available = unetList.includes(cfg.unetName)
       payload.unet_models = unetList
       payload.clip_available = clipList.includes(cfg.clipName)
       payload.vae_available = vaeList.includes(cfg.vaeName)
     } else {
+      payload.unet_loader = isGgufUnet(cfg) ? 'UnetLoaderGGUF' : 'UNETLoader'
+      payload.unet_loader_available = undefined
       payload.unet_available = undefined
       payload.clip_available = undefined
       payload.vae_available = undefined
@@ -312,7 +371,7 @@ exports.apply = async function apply(ctx, cfg) {
       `ComfyUI 状态：在线`,
       `版本：${payload.comfyui_version || '未知'}`,
       `GPU：${payload.gpu || '未知'}（显存 ${payload.vram_total_mb}MB / 空闲 ${payload.vram_free_mb}MB）`,
-      `主模型：${cfg.unetName} ${modelStatus(cfg.unetName, payload.unet_available)}`,
+      `主模型：${cfg.unetName} ${modelStatus(cfg.unetName, payload.unet_available)}（加载器 ${payload.unet_loader || (isGgufUnet(cfg) ? 'UnetLoaderGGUF' : 'UNETLoader')}）`,
       `文本编码器：${cfg.clipName} ${modelStatus(cfg.clipName, payload.clip_available)}`,
       `VAE：${cfg.vaeName} ${modelStatus(cfg.vaeName, payload.vae_available)}`,
       `可用尺寸：${payload.allowed_sizes.join('、')}`,
@@ -323,14 +382,48 @@ exports.apply = async function apply(ctx, cfg) {
     return lines.join('\n')
   }
 
+  // 自定义工作流的诊断明细：来源路径 / mtime / 实际解析到的节点 ID / 定位方式
+  function customWorkflowDiagLines() {
+    const lines = []
+    const report = inspectCustomWorkflow(cfg, workflowOpts())
+    if (!report.ok && !report.path) {
+      lines.push(`自定义工作流：读取失败 — ${report.error}`)
+      return lines
+    }
+    lines.push(`自定义工作流：${report.path}`)
+    if (report.mtimeMs) {
+      const stamp = new Date(report.mtimeMs)
+      lines.push(`工作流更新时间：${stamp.toLocaleString('zh-CN')}（${cfg.customWorkflowReloadOnChange === false ? '变更不自动重载' : '变更自动重载'}）`)
+    }
+    if (!report.ok) {
+      lines.push(`自定义工作流：解析失败 — ${report.error}`)
+      return lines
+    }
+    const t = report.targets
+    const how = (configured, found) => (configured ? '配置指定' : (found ? '自动识别' : '自动识别（未找到）'))
+    const fmt = (ids) => (ids && ids.length ? ids.map(id => `#${id}`).join('、') : '（无）')
+    lines.push(`正面提示词节点：${fmt(t.positive)}（${how(cfg.positivePromptNodeId, t.positive.length)}）`)
+    lines.push(`负面提示词节点：${fmt(t.negative)}（${how(cfg.negativePromptNodeId, t.negative.length)}）`)
+    lines.push(`尺寸节点：${fmt(t.resolutionIds)}（${how(cfg.resolutionNodeId, t.resolutionIds.length)}）`)
+    lines.push(`步数节点：${fmt(t.stepsIds)}（${how(cfg.stepsNodeId, t.stepsIds.length)}）`)
+    lines.push(`种子节点：${fmt(t.seedIds)}（${how(cfg.seedNodeId, t.seedIds.length)}）`)
+    lines.push(`识别的文本编码节点：${fmt(t.textNodes)}`)
+    return lines
+  }
+
   async function diagnoseText(session) {
     const payload = await statusPayload()
     const lines = ['【p-draw 诊断】']
     lines.push(`插件版本：${require('./package.json').version || '未知'}`)
     lines.push(`ComfyUI 地址：${payload.base_url}`)
     lines.push(`工作流：${cfg.customWorkflowEnabled ? '自定义 ' + (cfg.customWorkflowPath || '(未填写路径)') : (cfg.workflow || 'anima_t2i')}`)
+    if (cfg.customWorkflowEnabled) {
+      lines.push(...customWorkflowDiagLines())
+    }
     lines.push(`模型：${cfg.unetName} / ${cfg.clipName} / ${cfg.vaeName}`)
+    lines.push(`主模型加载器：${payload.unet_loader || (isGgufUnet(cfg) ? 'UnetLoaderGGUF' : 'UNETLoader')}`)
     lines.push(`默认尺寸：${cfg.width}x${cfg.height}，步数 ${cfg.steps}，CFG ${cfg.cfg}，采样器 ${cfg.samplerName}/${cfg.scheduler}`)
+    lines.push(`质量前缀：${String(cfg.qualityPrefix || '').trim() ? '已配置' + (shouldSkipQualityPrefix() ? '（自定义工作流下已跳过）' : '') : '未配置（空）'}`)
     lines.push(`队列：${cfg.queueEnabled ? '启用（上限 ' + (cfg.queueMaxRequests || '∞') + '）' : '关闭'}`)
     lines.push(`P 点价格：${cfg.price}`)
     lines.push(`权限：${cfg.adminOnly ? '仅管理员' : '开放'}`)
@@ -342,6 +435,9 @@ exports.apply = async function apply(ctx, cfg) {
       lines.push(`版本：${payload.comfyui_version || '未知'}`)
       lines.push(`GPU：${payload.gpu || '未知'}（显存 ${payload.vram_total_mb}MB / 空闲 ${payload.vram_free_mb}MB）`)
       lines.push(`模型可用性：主模型${payload.unet_available === undefined ? '（未获取）' : payload.unet_available ? '✓' : '✗'} / 编码器${payload.clip_available === undefined ? '（未获取）' : payload.clip_available ? '✓' : '✗'} / VAE${payload.vae_available === undefined ? '（未获取）' : payload.vae_available ? '✓' : '✗'}`)
+      if (payload.unet_loader_available === false) {
+        lines.push(`加载器提示：ComfyUI 中没有 ${payload.unet_loader} 节点，请安装 ComfyUI-GGUF 插件，或把 useGgufUnet 设为 false 使用 safetensors 模型。`)
+      }
       if (payload.unet_models && payload.unet_models.length) {
         lines.push(`可选模型：\n${payload.unet_models.join('\n')}`)
       }
@@ -352,6 +448,9 @@ exports.apply = async function apply(ctx, cfg) {
     if (payload.object_info_warning) {
       lines.push(`模型列表接口：${payload.object_info_warning}（不影响生图）`)
     }
+    // A7：自定义工作流 + 非空 qualityPrefix 的迁移提示
+    const warning = qualityPrefixWarning()
+    if (warning) lines.push(`⚠ ${warning}`)
     return lines.join('\n')
   }
 
@@ -549,6 +648,8 @@ exports.apply = async function apply(ctx, cfg) {
       const objectInfo = await getObjectInfoCached()
       const list = [
         ...availableModels(objectInfo, 'UNETLoader', 'unet_name'),
+        // GGUF 模型（ComfyUI-GGUF）同样可供用户选择
+        ...availableModels(objectInfo, 'UnetLoaderGGUF', 'unet_name'),
         ...availableModels(objectInfo, 'CheckpointLoaderSimple', 'ckpt_name')
           .filter(name => String(name).trim().toLowerCase().replace(/[-_]/g, '~') === 'animagine~xl~3.1.safetensors'),
       ]
@@ -623,7 +724,7 @@ exports.apply = async function apply(ctx, cfg) {
     const cfgVal = Number(overrides.cfg) || workCfg.cfg
     const seed = Number(overrides.seed) || crypto.randomInt(1, 2 ** 32 - 1)
     const negativePrompt = joinPromptParts([overrides.negativePrompt || cfg.negativePrompt || ''])
-    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size))
+    const promptBody = buildWorkflow(workCfg, prompt, negativePrompt, width, height, steps, cfgVal, seed, Boolean(size), workflowOpts())
 
     const clientId = crypto.randomUUID()
     const submit = await comfyPost('/prompt', { prompt: promptBody, client_id: clientId }, 20000)
@@ -874,7 +975,7 @@ exports.apply = async function apply(ctx, cfg) {
   async function composePrompt(userPrompt, raw, fixedOverride) {
     if (raw) return { prompt: userPrompt, degraded: false }
     const parts = []
-    if (cfg.qualityPrefix) parts.push(String(cfg.qualityPrefix).trim())
+    if (cfg.qualityPrefix && !shouldSkipQualityPrefix()) parts.push(String(cfg.qualityPrefix).trim())
     if (fixedOverride === 'skip') {
       // 不注入固定角色 tags
     } else if (typeof fixedOverride === 'string') {
@@ -1156,7 +1257,7 @@ exports.apply = async function apply(ctx, cfg) {
     // 组装最终提示词：质量词 + 画师组 + 主 tag 流（含角色外观）+ narrative 块（仅互动/站位）
     const contentClean = cleanContentTags(commonContent, 65, false, [], true)
     const parts = []
-    if (cfg.qualityPrefix) parts.push(String(cfg.qualityPrefix).trim())
+    if (cfg.qualityPrefix && !shouldSkipQualityPrefix()) parts.push(String(cfg.qualityPrefix).trim())
     // 多人同样遵守 no artist 守卫（与单图一致）：用户说「不要画师」时跳过画师 tags
     const artistTags = resolveArtistTags(prompt)
     if (artistTags) parts.push(artistTags)
@@ -2180,5 +2281,5 @@ exports.apply = async function apply(ctx, cfg) {
   })
 
   // 暴露内部接口供自动化测试调用（Koishi 忽略 apply 返回值，不影响生产行为）
-  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch }
+  return { couponConfirmFlow, buyCouponsAndConsume, normalizeConfirm, resolveCouponPrice, buildChargeNotice, buildGenerationReply, shouldOptimizePerImage, sendNotices, sendImagesAsForward, executeBatch, composePrompt, shouldSkipQualityPrefix, qualityPrefixWarning, customWorkflowDiagLines, diagnoseText, workflowDir }
 }

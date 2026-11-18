@@ -8,6 +8,24 @@ const fs = require('fs')
 const plugin = require('../index.js')
 const { zhCN } = require('../lib/i18n')
 
+// 统一的测试临时目录：进程退出时自动清理，避免在系统临时目录留下垃圾
+const tempDirs = []
+const disposeHandlers = []
+function tmpDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  tempDirs.push(dir)
+  return dir
+}
+process.on('exit', () => {
+  // 先跑插件注册的 dispose（清理它自己的临时目录），再清理测试自己建的目录
+  for (const handler of disposeHandlers) {
+    try { handler() } catch (e) { /* ignore */ }
+  }
+  for (const dir of tempDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch (e) { /* ignore */ }
+  }
+})
+
 // ---- mock Koishi ctx ----
 function makeLogger() {
   const noop = () => {}
@@ -24,7 +42,7 @@ function makeCtx(initialTables = {}) {
   }
   const matches = (row, query) => Object.entries(query || {}).every(([key, value]) => row[key] === value)
   const ctx = {
-    baseDir: fs.mkdtempSync(path.join(os.tmpdir(), 'pdraw-ctx-')),
+    baseDir: tmpDir('pdrawtest-ctx-'),
     logger: () => makeLogger(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     i18n: { define: () => {} },
@@ -53,7 +71,9 @@ function makeCtx(initialTables = {}) {
         tables[table] = (tables[table] || []).filter(row => !matches(row, query))
       },
     },
-    on: () => {},
+    on: (event, handler) => {
+      if (event === 'dispose' && typeof handler === 'function') disposeHandlers.push(handler)
+    },
     commands,
     actions,
     tables,
@@ -441,4 +461,109 @@ test('continuous generation is absent from configuration, help, and command hand
   assert.ok(!source.includes('handleGenerate' + 'Series'))
   assert.ok(!source.includes("text.match(/^\u8fde\u7eed\\s*(.*)$/)"))
   assert.deepStrictEqual(ctx.commands, ['p/p-draw [prompt:rawtext]'])
+})
+
+// ---------------- Design.md A4/A7：质量前缀与 Aesthetic 适配 ----------------
+
+test('custom workflow skips the quality prefix when the switch is on (A4)', async () => {
+  const saved = {
+    customWorkflowEnabled: cfg.customWorkflowEnabled,
+    skipQualityPrefixForCustomWorkflow: cfg.skipQualityPrefixForCustomWorkflow,
+    qualityPrefix: cfg.qualityPrefix,
+    artistPresets: cfg.artistPresets,
+    activeArtistPreset: cfg.activeArtistPreset,
+    defaultArtistTags: cfg.defaultArtistTags,
+    styleTags: cfg.styleTags,
+  }
+  try {
+    cfg.qualityPrefix = 'masterpiece, best quality'
+    cfg.artistPresets = []
+    cfg.activeArtistPreset = ''
+    cfg.defaultArtistTags = ''
+    cfg.styleTags = ''
+
+    // 内置工作流：质量前缀照常注入
+    cfg.customWorkflowEnabled = false
+    const builtin = await iface.composePrompt('1girl, solo', false)
+    assert.ok(builtin.prompt.includes('masterpiece'))
+
+    // 自定义工作流 + 默认开关(true)：跳过质量前缀
+    cfg.customWorkflowEnabled = true
+    cfg.skipQualityPrefixForCustomWorkflow = true
+    const skipped = await iface.composePrompt('1girl, solo', false)
+    assert.ok(!skipped.prompt.includes('masterpiece'))
+    assert.ok(skipped.prompt.includes('1girl'))
+
+    // 关掉开关：仍然注入
+    cfg.skipQualityPrefixForCustomWorkflow = false
+    const kept = await iface.composePrompt('1girl, solo', false)
+    assert.ok(kept.prompt.includes('masterpiece'))
+  } finally {
+    Object.assign(cfg, saved)
+  }
+})
+
+test('qualityPrefixWarning hints about Aesthetic migration only for custom workflows (A7)', () => {
+  const saved = {
+    customWorkflowEnabled: cfg.customWorkflowEnabled,
+    skipQualityPrefixForCustomWorkflow: cfg.skipQualityPrefixForCustomWorkflow,
+    qualityPrefix: cfg.qualityPrefix,
+  }
+  try {
+    // 内置工作流：不提示
+    cfg.customWorkflowEnabled = false
+    cfg.qualityPrefix = 'masterpiece'
+    assert.strictEqual(iface.qualityPrefixWarning(), '')
+
+    // 自定义工作流 + 空前缀：不提示
+    cfg.customWorkflowEnabled = true
+    cfg.qualityPrefix = ''
+    assert.strictEqual(iface.qualityPrefixWarning(), '')
+
+    // 自定义工作流 + 非空前缀 + 已自动跳过
+    cfg.qualityPrefix = 'masterpiece'
+    cfg.skipQualityPrefixForCustomWorkflow = true
+    assert.ok(iface.qualityPrefixWarning().includes('已自动跳过'))
+    assert.ok(iface.qualityPrefixWarning().includes('建议手动置空'))
+
+    // 自定义工作流 + 非空前缀 + 未跳过
+    cfg.skipQualityPrefixForCustomWorkflow = false
+    assert.ok(iface.qualityPrefixWarning().includes('可能不适用于 Aesthetic'))
+  } finally {
+    Object.assign(cfg, saved)
+  }
+})
+
+test('diagnoseText reports custom workflow node IDs without contacting ComfyUI', async () => {
+  const path_ = require('path')
+  const os_ = require('os')
+  const fs_ = require('fs')
+  const dir = tmpDir('pdrawtest-diag-')
+  const wfFile = path_.join(dir, 'wf.json')
+  fs_.writeFileSync(wfFile, JSON.stringify({
+    '1': { class_type: 'KSampler', inputs: { positive: ['10', 0], negative: ['11', 0], seed: 0 } },
+    '10': { class_type: 'CLIPTextEncode', inputs: { text: 'p', clip: ['2', 0] } },
+    '11': { class_type: 'CLIPTextEncode', inputs: { text: 'n', clip: ['2', 0] } },
+  }))
+
+  const saved = {
+    customWorkflowEnabled: cfg.customWorkflowEnabled,
+    customWorkflowPath: cfg.customWorkflowPath,
+    qualityPrefix: cfg.qualityPrefix,
+    comfyuiBaseUrl: cfg.comfyuiBaseUrl,
+  }
+  try {
+    cfg.customWorkflowEnabled = true
+    cfg.customWorkflowPath = wfFile
+    cfg.qualityPrefix = 'masterpiece'
+    // 指向不可达地址，避免诊断依赖真实 ComfyUI
+    cfg.comfyuiBaseUrl = 'http://127.0.0.1:1'
+    const text = await iface.diagnoseText({ userId: 'u1' })
+    assert.ok(text.includes('自定义工作流'))
+    assert.ok(text.includes('#10'))
+    assert.ok(text.includes('#11'))
+    assert.ok(text.includes('masterpiece 对 Aesthetic') || text.includes('建议手动置空'))
+  } finally {
+    Object.assign(cfg, saved)
+  }
 })
