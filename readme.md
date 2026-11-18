@@ -453,7 +453,7 @@ defaultWorkflowPreset: 基础文生图
 | 03 | DMDX 4-Step Speed Run | 19 | 文本 | ⏳ 需 DMDX LoRA（`dmdx_student_final_comfy.safetensors`） |
 | 04 | Three-Stage High-Quality | 26 | 文本 | ✅ 可用（已转好并实测） |
 | 01 | 1.5x Upscale | 20 | 文本 | ✅ 可用（见下方依赖） |
-| 05 | Tiled Upscale | 45 | 图片 | ⚠️ 分块节点的 schema 映射待处理 |
+| 05 | Tiled Upscale | 45 | 图片 | ⏳ 已转好，需 `4x_NMKD-Siax_200k.pth`（放 `models/upscale_models`） |
 | 08 | T2I + ControlNet + Face/Hand Repair | 60 | 文本 + 控制图 | ✅ 可用（已裁成单输出；ControlNet 分支默认旁路，需检测器 + SAM 模型） |
 | 02 | ControlNet Precision Control | 32 | 图片 | ❌ 需图生图 |
 | 06 | i2i + ControlNet + Face/Hand Repair | 52 | 图片 | ✅ 可用（已裁成单输出；WD14 打标器已剔除，重绘幅度建议 0.4–0.6） |

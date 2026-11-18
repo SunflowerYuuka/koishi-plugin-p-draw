@@ -76,11 +76,14 @@ function resolveSource(map, target, seen = new Set()) {
     const m = srcByName.get(String(node.id)) || {}
     const outs = node.outputs || []
     outs.forEach((out, outSlot) => {
-      const matchName = Object.keys(m).find((name) => {
+      const keys = Object.keys(m)
+      // Reroute 的输入名是空字符串，不能用真值判断（"" 是假值）
+      const matched = keys.find((name) => {
         const inpDef = (node.inputs || []).find(i => i.name === name)
         return inpDef && (inpDef.type === out.type || inpDef.type === '*' || out.type === '*')
-      }) || Object.keys(m)[0]
-      if (matchName) bypassMap.set(`${node.id}:${outSlot}`, m[matchName])
+      })
+      const pick = matched !== undefined ? matched : keys[0]
+      if (pick !== undefined) bypassMap.set(`${node.id}:${outSlot}`, m[pick])
     })
   }
 
