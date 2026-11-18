@@ -39,9 +39,13 @@ function isWidgetSpec(spec) {
   return typeof head === 'string'
 }
 
-function resolveSource(map, target) {
-  const pass = map.get(`${target[0]}:${target[1]}`)
-  return pass || target
+// 旁路节点可能串联（A 旁路 → B 旁路 → 消费者），要一路追到真正的源头
+function resolveSource(map, target, seen = new Set()) {
+  const key = `${target[0]}:${target[1]}`
+  if (seen.has(key)) return target
+  seen.add(key)
+  const pass = map.get(key)
+  return pass ? resolveSource(map, pass, seen) : target
 }
 
 ;(async () => {
