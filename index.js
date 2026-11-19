@@ -560,8 +560,64 @@ exports.apply = async function apply(ctx, rawConfig) {
     return types
   }
 
+  // HTML 实体还原：NapCat / LLOneBot 给的图片地址常带 &amp; 转义，
+  // 不还原会让 query 参数错位，图床直接回 400。
+  function unescapeHtmlEntities(value) {
+    return String(value || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/&#0*38;/g, '&')
+      .replace(/&#0*44;/g, ',')
+      .replace(/&#0*91;/g, '[')
+      .replace(/&#0*93;/g, ']')
+      .replace(/&quot;/gi, '"')
+  }
+
+  // 兜底：让适配器自己去取图（OneBot 的 get_image 支持用 file 参数换 base64 / 本地路径）
+  async function fetchImageViaAdapter(session, src) {
+    const bot = session && session.bot
+    if (!bot) return null
+    const internal = bot.internal
+    if (!internal) return null
+    const call = async (action, payload) => {
+      try {
+        if (typeof internal === 'function') return await internal(action, payload)
+        if (internal && typeof internal[action] === 'function') return await internal[action](payload)
+      } catch (e) { /* 换下一个 */ }
+      return null
+    }
+    for (const action of ['get_image', 'get_file']) {
+      const res = await call(action, { file: src })
+      const got = (res && res.data) || res
+      if (!got || typeof got !== 'object') continue
+      const candidates = [got.file, got.base64, got.url, got.path]
+      for (const raw of candidates) {
+        if (typeof raw !== 'string' || !raw) continue
+        if (/^base64:\/\//i.test(raw)) {
+          const decoded = decodeDataUrl('data:image/png;base64,' + raw.slice('base64://'.length))
+          if (decoded) return decoded
+        }
+        if (/^https?:\/\//i.test(raw)) {
+          try {
+            const res2 = await outboundFetch(raw, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } })
+            if (res2.ok) {
+              const buffer = Buffer.from(await res2.arrayBuffer())
+              if (buffer.length) {
+                const headerType = res2.headers && typeof res2.headers.get === 'function' ? res2.headers.get('content-type') : ''
+                return { buffer, contentType: headerType || 'image/png' }
+              }
+            }
+          } catch (e) { /* ignore */ }
+        }
+        if (raw.startsWith('/') || /^[a-z]:[\\/]/i.test(raw)) {
+          try { return { buffer: await fsp.readFile(raw), contentType: guessContentType(raw) } } catch (e) { /* ignore */ }
+        }
+      }
+    }
+    return null
+  }
+
   async function fetchImageBuffer(src) {
-    const text = String(src || '')
+    const text = unescapeHtmlEntities(src).trim()
     const dataUrl = decodeDataUrl(text)
     if (dataUrl) return dataUrl
     if (/^base64:\/\//i.test(text)) {
@@ -569,16 +625,51 @@ exports.apply = async function apply(ctx, rawConfig) {
       if (decoded) return decoded
       throw new Error('base64 图片解码失败')
     }
+    // 本地路径：file:// 或适配器直接给绝对路径（NapCat 这类会给磁盘路径）
     if (/^file:\/\//i.test(text)) {
       const filePath = fileURLToPath(text)
       return { buffer: await fsp.readFile(filePath), contentType: guessContentType(filePath) }
     }
+    if (/^[a-z]:[\\/]/i.test(text) || text.startsWith('/')) {
+      try {
+        return { buffer: await fsp.readFile(text), contentType: guessContentType(text) }
+      } catch (e) { /* 落到下面的图片来源判定 */ }
+    }
     if (/^https?:\/\//i.test(text)) {
-      const res = await outboundFetch(text, {})
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const buffer = Buffer.from(await res.arrayBuffer())
-      const headerType = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-type') : ''
-      return { buffer, contentType: headerType || guessContentType(text) }
+      // QQ 图床对 UA / Referer 敏感，裸 fetch 经常回 400/403；
+      // 另外链接可能被适配器双重编码，所以把原样 / 解码 / 编码三种都试一遍。
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        Referer: 'https://q.qq.com/',
+      }
+      const headerVariants = [
+        headers,
+        { 'User-Agent': headers['User-Agent'] }, // 个别图床加了 Referer 反而 403
+      ]
+      const candidates = [text]
+      try { const d = decodeURIComponent(text); if (!candidates.includes(d)) candidates.push(d) } catch (e) { /* ignore */ }
+      try { const e2 = encodeURI(decodeURI(text)); if (!candidates.includes(e2)) candidates.push(e2) } catch (e) { /* ignore */ }
+      let lastError = ''
+      for (const url of candidates) {
+        for (const hdrs of headerVariants) {
+          try {
+            const res = await outboundFetch(url, { headers: hdrs })
+            if (!res.ok) { lastError = `HTTP ${res.status}`; continue }
+            const buffer = Buffer.from(await res.arrayBuffer())
+            if (!buffer.length) { lastError = '响应为空'; continue }
+            const headerType = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-type') : ''
+            // 被防盗链挡掉时返回的是一张 HTML 页面
+            if (headerType && /text\/html/i.test(headerType)) { lastError = '返回了 HTML 而不是图片（可能被防盗链拦截）'; continue }
+            return { buffer, contentType: headerType || guessContentType(text) }
+          } catch (e) {
+            lastError = e.message
+          }
+        }
+      }
+      let host = '未知来源'
+      try { host = new URL(text).host } catch (e) { /* ignore */ }
+      throw new Error(`${lastError || '下载失败'}（图片地址来自 ${host}）`)
     }
     throw new Error('不支持的图片来源')
   }
@@ -623,12 +714,23 @@ exports.apply = async function apply(ctx, rawConfig) {
 
     const files = []
     for (const src of sources) {
+      let done = false
       try {
         const { buffer, contentType } = await fetchImageBuffer(src)
         files.push(await uploadImageToComfy(outboundFetch, baseUrl(), { buffer, contentType }))
+        done = true
       } catch (e) {
-        return { ok: false, needsImage: true, message: `图片处理失败：${e.message}` }
+        // 直连下载失败（QQ 图床常见）时，退回让适配器自己取图
+        if (cfg.outputLogs) logger.warn(`[p-draw] 直连下载参考图失败（${e.message}），改用适配器取图`)
+        const viaBot = await fetchImageViaAdapter(session, src).catch(() => null)
+        if (viaBot && viaBot.buffer) {
+          files.push(await uploadImageToComfy(outboundFetch, baseUrl(), { buffer: viaBot.buffer, contentType: viaBot.contentType }))
+          done = true
+        } else {
+          return { ok: false, needsImage: true, message: `图片处理失败：${e.message}` }
+        }
       }
+      if (!done) return { ok: false, needsImage: true, message: '图片处理失败：无法取得图片内容' }
     }
     if (cfg.outputLogs) logger.info(`[p-draw] 已上传 ${files.length} 张参考图：${files.join(', ')}`)
     return { ok: true, files, needsImage: true }
