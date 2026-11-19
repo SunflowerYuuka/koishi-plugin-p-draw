@@ -709,3 +709,25 @@ test('image sources come from the same message, quoted messages, and raw CQ stri
     ['http://cdn/7.png'],
   )
 })
+test('image sources also come from session.elements and string forms adapters use', () => {
+  const f = iface.messageImageSources
+
+  // 6) Koishi 归一化后的 session.elements（跨适配器最可靠）
+  assert.deepStrictEqual(
+    f({ elements: [{ type: 'text', attrs: {} }, { type: 'img', attrs: { src: 'http://cdn/7.png' } }] }),
+    ['http://cdn/7.png'],
+  )
+  // 7) h() 的字符串形式 <img src="..."/>
+  assert.deepStrictEqual(f({ event: { message: '看 <img src="http://cdn/8.png"/> 这张' } }), ['http://cdn/8.png'])
+  // 8) QQ 图床链接没有扩展名
+  assert.deepStrictEqual(
+    f({ event: { message: 'https://gchat.qpic.cn/gchatpic_new/0/0-0-ABCDEF/0' } }),
+    ['https://gchat.qpic.cn/gchatpic_new/0/0-0-ABCDEF/0'],
+  )
+  // 9) attrs.src 本身是对象
+  assert.deepStrictEqual(f({ event: { message: [{ type: 'image', attrs: { src: { url: 'http://cdn/9.png' } } }] } }), ['http://cdn/9.png'])
+  // 10) 适配器把整条消息给成 { elements: [...] }
+  assert.deepStrictEqual(f({ event: { message: { elements: [{ type: 'img', attrs: { src: 'http://cdn/10.png' } }] } } }), ['http://cdn/10.png'])
+  // 11) CQ 码里的转义逗号
+  assert.deepStrictEqual(f({ event: { message: '[CQ:image,file=a.png&#44;subType=1]' } }), ['a.png,subType=1'])
+})

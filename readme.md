@@ -696,3 +696,23 @@ user = 一个二次元白发红瞳女孩坐在草地上
 1.6.12 起的输出校验（`looksLikeTags` / `cleanOptimizedTags`）保留：正常出 tags 时完全不介入，只在模型返回散文时触发回退并提示，上面那条 `output_not_tags` 就是它报出来的。
 
 实测覆盖 `deepseek-v4.1-flash` / `deepseek-v4-pro` × 三条不同指令，9 次调用中 8 次给出合规 tags（30–46 个，人数、发色、瞳色、服装、动作、场景全部保留，服装细节/光影/镜头/画风由模型补全）；`deepseek-v4-pro` 有 1 次返回空内容，插件会按候选链跳过该模型，不影响出图。
+
+### 1.6.16
+
+**修复：图生图类工作流明明带了图，却提示"需要图片输入"**
+
+取图逻辑只认 `session.event.message` 数组里的 `img` / `image` 元素，实际适配器还会把图放在别处，于是漏图。1.6.16 补齐了来源：
+
+| 来源 | 说明 |
+|---|---|
+| `session.elements` | Koishi 归一化后的元素列表，跨适配器最可靠，现在优先用 |
+| `event.message` 为对象 `{ elements: [...] }` | 部分适配器不是数组形式 |
+| 字符串形式的 `<img src="..."/>` | `h()` 序列化后的消息 |
+| CQ 码里的转义 | `&#44;` `&#91;` `&#93;` `&amp;` 现在会还原 |
+| QQ 图床链接（无扩展名） | `gchat.qpic.cn` / `multimedia.nt.qq.com.cn` / `gchatpic` 也认 |
+| `attrs.src` 本身是对象 | 取其中的 `url` / `href` / `file` / `path` |
+| `data` 是对象 | 取其中的 `url` / `src` / `file` / `path` |
+
+另外，识别不到图时：`outputLogs` 打开会在日志里打一行消息结构（元素类型、是否有 `session.elements`、`event.message` 的类型、是否带引用），方便继续定位；提示里没识别到任何元素时会写明"（没读到任何消息元素）"，不再只给一句空白。
+
+取图相关测试补了 6 个场景（`session.elements`、`<img src>` 字符串、QQ 图床无扩展名、`src` 为对象、消息为 `{elements}`、CQ 转义）。

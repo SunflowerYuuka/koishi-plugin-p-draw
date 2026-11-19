@@ -461,20 +461,34 @@ exports.apply = async function apply(ctx, rawConfig) {
   // ---------------- 图生图：从消息取图 → 下载 → 上传到 ComfyUI ----------------
 
   // 消息里带的图片地址（http / file / base64 / data: 都可能有）
-  // 图片元素的 src 在不同适配器里落点不一样：src / url / file 都见过
+  // 图片元素的 src 在不同适配器里落点不一样：src / url / file / path 都见过，
+  // 还有把 src 本身写成对象（{url}）的。
   function imageElementSrc(element) {
     const attrs = (element && element.attrs) || {}
-    const src = attrs.src || attrs.url || attrs.file || attrs.path
+    let src = attrs.src || attrs.url || attrs.file || attrs.path
+    if (src && typeof src === 'object') src = src.url || src.href || src.file || src.path || ''
     if (src) return String(src)
-    // 兜底：某些适配器把地址放在 data 里
+    // 兜底：某些适配器把地址放在 data 里（字符串或对象）
     if (element && typeof element.data === 'string' && /^(https?:|base64:|data:|file:)/i.test(element.data)) return element.data
+    const data = element && element.data
+    if (data && typeof data === 'object') {
+      const nested = data.url || data.src || data.file || data.path
+      if (nested && typeof nested === 'string') return nested
+    }
     return ''
+  }
+
+  // CQ 码里 , ] & 会被转义
+  function decodeCqValue(value) {
+    return String(value || '')
+      .replace(/&#44;/g, ',').replace(/&#91;/g, '[').replace(/&#93;/g, ']')
+      .replace(/&amp;/g, '&')
   }
 
   // 从消息里收集图片地址。支持：
   // 1) 同一条消息里的图片（图 + 文字一起发）
   // 2) 引用的消息里的图片（回复一张图再发指令）
-  // 3) 适配器把消息给成字符串时，从 CQ 码 / 裸链接里捞
+  // 3) 适配器把消息给成字符串时，从 CQ 码 / <img src> / 裸链接里捞
   function messageImageSources(session) {
     const sources = []
     const seen = new Set()
@@ -489,9 +503,13 @@ exports.apply = async function apply(ctx, rawConfig) {
       if (!message) return
       if (typeof message === 'string') {
         // CQ 码：CQ:image,file=xxx / CQ:image,url=xxx
-        for (const m of message.matchAll(/\[CQ:image,[^\]]*?(?:file|url)=([^,\]]+)/gi)) push(m[1])
-        // 裸链接
-        for (const m of message.matchAll(/https?:\/\/[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp)/gi)) push(m[0])
+        for (const m of message.matchAll(/\[CQ:image,[^\]]*?(?:file|url)=([^,\]]+)/gi)) push(decodeCqValue(m[1]))
+        // Koishi h() 的字符串形式：<img src="..."/>
+        for (const m of message.matchAll(/<img[^>]*?src=["']([^"']+)["']/gi)) push(decodeCqValue(m[1]))
+        // 带扩展名的裸链接
+        for (const m of message.matchAll(/https?:\/\/[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp)(?:\?[^\s"'<>]*)?/gi)) push(m[0])
+        // QQ 图床的链接往往没有扩展名
+        for (const m of message.matchAll(/https?:\/\/[^\s"'<>]*(?:qpic\.cn|multimedia\.nt\.qq\.com\.cn|gchatpic)[^\s"'<>]*/gi)) push(m[0])
         return
       }
       if (Array.isArray(message)) {
@@ -504,13 +522,23 @@ exports.apply = async function apply(ctx, rawConfig) {
             // 引用的消息可能还带自己的 elements
             collect(element.attrs && element.attrs.elements)
             collect(element.data && element.data.elements)
+          } else if (type === 'message' || type === 'figure' || type === 'forward') {
+            collect(element.children || (element.attrs && element.attrs.elements))
           }
         }
+        return
       }
+      // 适配器直接把消息给成对象：{ elements: [...] }
+      if (typeof message === 'object' && Array.isArray(message.elements)) collect(message.elements)
     }
 
     try {
+      // session.elements 是 Koishi 归一化后的元素列表，跨适配器最可靠，优先用
+      collect(session?.elements)
       collect(session?.event?.message)
+      collect(session?.event?.message && session.event.message.elements)
+      collect(session?.content)
+      collect(session?.event?.raw_message)
       // 引用场景：部分适配器把被引用消息放在 event.quote / session.quote
       collect(session?.event?.quote && session.event.quote.elements)
       collect(session?.quote && session.quote.elements)
@@ -521,14 +549,12 @@ exports.apply = async function apply(ctx, rawConfig) {
   // 消息里都有哪些元素类型（图片没识别出来时用来解释原因）
   function messageElementTypes(session) {
     const types = []
+    const add = (t) => { const s = String(t || '?').toLowerCase(); if (s && !types.includes(s)) types.push(s) }
     try {
-      const message = session?.event?.message
-      if (typeof message === 'string') return ['text(原始字符串)']
-      if (Array.isArray(message)) {
-        for (const element of message) {
-          const type = String((element && element.type) || '?').toLowerCase()
-          if (!types.includes(type)) types.push(type)
-        }
+      for (const list of [session?.elements, session?.event?.message, session?.event?.message?.elements]) {
+        if (!list) continue
+        if (typeof list === 'string') { add('text(原始字符串)'); continue }
+        if (Array.isArray(list)) for (const element of list) add(element && element.type)
       }
     } catch (e) { /* ignore */ }
     return types
@@ -574,7 +600,20 @@ exports.apply = async function apply(ctx, rawConfig) {
     const sources = messageImageSources(session)
     if (!sources.length) {
       const types = messageElementTypes(session)
-      const seen = types.length ? `\n（这条消息里识别到的元素：${types.join('、')}）` : ''
+      const seen = types.length ? `\n（这条消息里识别到的元素：${types.join('、')}）` : '\n（没读到任何消息元素）'
+      if (cfg.outputLogs) {
+        // 排查用：把消息结构打成一行（截断，避免把图片 base64 刷进日志）
+        let shape = ''
+        try {
+          shape = JSON.stringify({
+            elements: messageElementTypes(session),
+            hasSessionElements: Array.isArray(session?.elements) && session.elements.length > 0,
+            eventMessageType: typeof session?.event?.message,
+            quote: Boolean(session?.quote || session?.event?.quote),
+          })
+        } catch (e) { shape = '(无法序列化)' }
+        logger.warn(`[p-draw] 工作流需要图片但没从消息里找到：${shape}`)
+      }
       return {
         ok: false,
         needsImage: true,
