@@ -271,6 +271,7 @@ exports.Config = Schema.object({
 const {
   normalizeBaseUrl, escapeRe, parseGenerationSize, parseBatchCount, parseSeed, parseStepsCfg, parseWorkflowPreset,
   stripRawPrefix, splitPositiveNegativePrompt, parseNameTags, parsePresetList, mergeTagText,
+  looksLikeTags, cleanOptimizedTags,
 } = require('./lib/parse')
 const {
   splitTags, joinPromptParts, mergeNegativePrompts, cleanContentTags, appendInlineProtectedTags,
@@ -1425,17 +1426,29 @@ exports.apply = async function apply(ctx, rawConfig) {
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
+    // 模板里已经通过 {theme} 嵌入了用户原文时，user 消息只给一句硬性要求。
+    // 否则模型容易把 user 消息当成聊天请求作答（实测会吐中文角色卡而不是 tags）。
+    const themeEmbedded = /\{theme\}/.test(template)
+    const userMessage = themeEmbedded
+      ? '请严格按系统要求执行：只输出一行英文 Danbooru tags，用英文逗号分隔，不要解释、标题、编号、Markdown 或中文。'
+      : userPrompt
     const outcome = await callLlm({
       role: 'text',
       system: rendered,
-      user: userPrompt,
+      user: userMessage,
       maxTokens: cfg.llmMaxTokens,
     })
     if (!outcome.ok) {
       logger.warn(`提示词优化失败（已尝试 ${outcome.errors.length} 个候选）：${outcome.reason}`)
       return { ok: false, prompt: userPrompt, reason: outcome.reason }
     }
-    return { ok: true, prompt: outcome.text }
+    // 校验模型输出确实像 tags；不像就回退原始描述，避免把散文当提示词喂给工作流
+    const cleaned = cleanOptimizedTags(outcome.text)
+    if (!looksLikeTags(cleaned)) {
+      logger.warn(`提示词优化返回的不是 tags（${cleaned.length} 字符），已回退到原始描述：${cleaned.slice(0, 60)}…`)
+      return { ok: false, prompt: userPrompt, reason: 'output_not_tags' }
+    }
+    return { ok: true, prompt: cleaned }
   }
 
   // ---------------- 提示词组装 ----------------
@@ -2569,6 +2582,7 @@ exports.apply = async function apply(ctx, rawConfig) {
       const reasons = {
         'no-llm-config': '未配置 LLM（llmBaseUrl/llmModel 为空）',
         'raw': '无优化模式（原样生图）',
+        'output_not_tags': '模型没按 tags 格式返回，已改用你的原始描述',
       }
       notice.push(session.text('.no-optimize', [reasons[noOptimizeReason] || noOptimizeReason]))
     }

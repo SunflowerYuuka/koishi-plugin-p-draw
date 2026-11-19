@@ -1181,3 +1181,26 @@ test('an img2img workflow needs no empty-latent node to count as usable', () => 
   assert.strictEqual(report.ok, true, '图生图（无 EmptyLatentImage）应判为可用：' + (report.error || ''))
   assert.strictEqual(report.needsImage, true)
 })
+
+// ---------------- LLM 输出校验（防止把散文当提示词） ----------------
+
+test('looksLikeTags rejects prose and accepts real tag lists', () => {
+  assert.strictEqual(parse.looksLikeTags('1girl, solo, long white hair, red eyes'), true)
+  assert.strictEqual(parse.looksLikeTags('year 2025, masterpiece, 1girl'), true)
+  // 实测踩过的坑：模型返回中文角色卡
+  assert.strictEqual(parse.looksLikeTags('白发红瞳的二次元女孩——这个设定本身就很有画面感'), false)
+  assert.strictEqual(parse.looksLikeTags('**名字**：凛（Rin）／可自定'), false)
+  assert.strictEqual(parse.looksLikeTags('1girl。 solo'), false, '中文标点也算散文')
+  assert.strictEqual(parse.looksLikeTags(''), false)
+  assert.strictEqual(parse.looksLikeTags('a, '.repeat(400)), false, '过长视为散文')
+})
+
+test('cleanOptimizedTags normalises model formatting noise', () => {
+  assert.strictEqual(parse.cleanOptimizedTags('Positive: 1girl, solo'), '1girl, solo')
+  assert.strictEqual(parse.cleanOptimizedTags('提示词：1girl, solo'), '1girl, solo')
+  assert.strictEqual(parse.cleanOptimizedTags('**1girl**, **solo**'), '1girl, solo')
+  assert.strictEqual(parse.cleanOptimizedTags('1girl\nsolo\nwhite hair'), '1girl, solo, white hair')
+  assert.strictEqual(parse.cleanOptimizedTags('- 1girl\n- solo'), '1girl, solo')
+  assert.strictEqual(parse.cleanOptimizedTags('"1girl", "solo"'), '1girl, solo')
+  assert.strictEqual(parse.cleanOptimizedTags('```\n1girl, solo\n```'), '1girl, solo')
+})
