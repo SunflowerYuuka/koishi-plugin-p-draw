@@ -1426,12 +1426,10 @@ exports.apply = async function apply(ctx, rawConfig) {
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
-    // 模板里已经通过 {theme} 嵌入了用户原文时，user 消息只给一句硬性要求。
-    // 否则模型容易把 user 消息当成聊天请求作答（实测会吐中文角色卡而不是 tags）。
-    const themeEmbedded = /\{theme\}/.test(template)
-    const userMessage = themeEmbedded
-      ? '请严格按系统要求执行：只输出一行英文 Danbooru tags，用英文逗号分隔，不要解释、标题、编号、Markdown 或中文。'
-      : userPrompt
+    // user 消息必须同时带上「示例 + 原文」：模型只把 user 当任务，system 里的原文它读不进去。
+    // 实测（deepseek-v4.1-flash / deepseek-v4-pro）：只给一句"请输出tags"会退化成默认女主
+    // （long hair, blue eyes, school uniform），给示例模式才会忠实翻译。
+    const userMessage = `示例：\n白发红瞳女孩 -> 1girl, white hair, red eyes\n金发蓝瞳女孩在雨中的街道上 -> 1girl, blonde hair, blue eyes, rain, street\n黑发绿瞳少女坐在草地上 -> 1girl, black hair, green eyes, sitting, grass\n现在翻译：${userPrompt}`
     const outcome = await callLlm({
       role: 'text',
       system: rendered,
