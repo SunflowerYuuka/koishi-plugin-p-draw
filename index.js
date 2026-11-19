@@ -1426,11 +1426,11 @@ exports.apply = async function apply(ctx, rawConfig) {
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
-    // 恢复 1.6.7 的消息形态：user 消息就是用户原文本身。
-    // 模型只把 user 当成要处理的任务，原文放在这里它才读得到；1.6.12 把这里
-    // 换成一句「请输出一行 tags」的约束后，模型读不到原文，会退化成记忆里的
-    // 默认女主（long hair, blue eyes, school uniform）。
-    const userMessage = userPrompt
+    // user 是唯一生效的消息（system 里的要求模型基本不当回事）。
+    // 这里同时写清两件事：① 允许自由补全画面细节；② 只输出一行 tags。
+    // 实测（deepseek-v4.1-flash）：35 个 tag，发色/瞳色/动作/场景全部保留，
+    // 并自动补上服装、光影、镜头、画风。
+    const userMessage = `你是 Anima 的提示词作者。\n需求：${userPrompt}\n\n请在内部把这句需求发展成一幅完整、协调、好看的画面（补全服装细节、姿态、构图、镜头、背景、环境、光影、色彩、氛围、前景和特效）。用户明确写到的要素必须保留：人数、发色、瞳色、服装、动作、场景，颜色不许改。\n\n最后只输出一行英文 Danbooru tags：英文逗号分隔，纯英文，不要解释、不要编号、不要 Markdown、不要中文。`
     const outcome = await callLlm({
       role: 'text',
       system: rendered,
