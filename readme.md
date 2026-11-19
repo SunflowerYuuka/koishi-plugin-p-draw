@@ -644,22 +644,17 @@ defaultWorkflowPreset: 基础文生图
 - **输出校验**：新增 `looksLikeTags` / `cleanOptimizedTags`。先清洗模型爱加的前缀（`Positive:`、`**加粗**`、引号、代码块、列表符号、多行），再判定像不像 tags：含中日韩文字、中文标点、Markdown 或长度超过 700 一律判为不合格。
 - 不合格时**回退到用户原始描述**继续出图，并在提示里说明原因（"模型没按 tags 格式返回，已改用你的原始描述"），不再默默产出废图。
 
-### 1.6.13
+### 1.6.14
 
-**修复：提示词优化把用户原文放错了位置，模型根本没读到（1.6.12 引入的回归）**
+**回退：提示词优化恢复 1.6.7 的消息形态**
 
-实测现象：`/anm 一个二次元白发红瞳女孩` 得到 `1girl, solo, long hair, blue eyes, smile, school uniform, ...`——发色丢了、瞳色变成了 `blue eyes`，还塞进了没要求的校服。
+1.6.12 为了防"模型输出中文散文"，把用户原文从 `user` 消息里拿掉、换成了 system 里的一句约束。实测这一步走错了：
 
-根因：1.6.12 为了防"模型输出中文散文"，把用户原文塞进了 `system`（模板里的 `{theme}`），`user` 只剩一句"请输出 tags"。实测 `deepseek-v4.1-flash` / `deepseek-v4-pro` 两个模型都只把 `user` 当任务，`system` 里的原文不读，于是退回记忆里的默认女主。
+- 模型只把 `user` 消息当成"要处理的任务"，`system` 里的原文它读不到。原文不在 `user` 里时，模型会按记忆编一个默认女主，于是 `白发红瞳` 变成 `long hair, blue eyes, smile, school uniform`。
+- 同一模板、同一模型实测：原文在 `user` → `1girl, white hair, red eyes`（对）；原文不在 `user` → `1girl, solo, long hair, blue eyes, school uniform`（错）。
 
-四种消息形态实测（同一模板、同两个模型，各两条请求）：
+改动只有一处：`user` 消息从"一句约束"改回 `userPrompt`（即 1.6.7 的写法）。其余流程与 1.6.12 完全一致。
 
-| 形态 | 结果 |
-|---|---|
-| 原文在 system，user 只是一句约束（1.6.12 现状） | ✘ `1girl, solo, looking_at_viewer, smile, simple_background` / ✘ `no humans, simple background` |
-| 原文在 user，无示例 | ✘ 中文角色卡 |
-| **模板照旧，user = 示例 + 原文（本次改法）** | ✔ `1girl, white hair, red eyes, anime style` / ✔ `1girl, white hair, red eyes, sitting, grass` |
+1.6.12 新增的输出校验（`looksLikeTags` / `cleanOptimizedTags`）保留：它只在模型返回散文时触发并回退到原始描述，正常出 tags 时完全不介入。需要连这个也回退成 1.6.7 的无校验行为，可以再说。
 
-改动只有一处：`user` 消息改为少量示例 + `现在翻译：<原文>`。`system` 模板完全不动——包括模板里"可以自由决定服装细节""自行解决明显冲突"这类放权条款，实测对结果无影响。示例本身即约束格式与属性，因此不再需要额外校验层。
-
-另外提醒：`llmModels` 里 `deepseek-v4.1-flash-1017`、`deepseek-flash` 在该站返回 `model_not_found`（可用模型只有 `deepseek-v4-pro` 与 `deepseek-v4.1-flash`），建议清理。
+**关于 npm 上的 1.6.13**：`package@version` 一旦发布即被永久占用，撤回后也无法再用同一版本号。1.6.13 请弃用（deprecate），升级到 1.6.14。此前 1.6.14 之前未改动的部分，全部以 1.6.12 为准。

@@ -1426,10 +1426,11 @@ exports.apply = async function apply(ctx, rawConfig) {
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
-    // user 消息必须同时带上「示例 + 原文」：模型只把 user 当任务，system 里的原文它读不进去。
-    // 实测（deepseek-v4.1-flash / deepseek-v4-pro）：只给一句"请输出tags"会退化成默认女主
-    // （long hair, blue eyes, school uniform），给示例模式才会忠实翻译。
-    const userMessage = `示例：\n白发红瞳女孩 -> 1girl, white hair, red eyes\n金发蓝瞳女孩在雨中的街道上 -> 1girl, blonde hair, blue eyes, rain, street\n黑发绿瞳少女坐在草地上 -> 1girl, black hair, green eyes, sitting, grass\n现在翻译：${userPrompt}`
+    // 恢复 1.6.7 的消息形态：user 消息就是用户原文本身。
+    // 模型只把 user 当成要处理的任务，原文放在这里它才读得到；1.6.12 把这里
+    // 换成一句「请输出一行 tags」的约束后，模型读不到原文，会退化成记忆里的
+    // 默认女主（long hair, blue eyes, school uniform）。
+    const userMessage = userPrompt
     const outcome = await callLlm({
       role: 'text',
       system: rendered,
